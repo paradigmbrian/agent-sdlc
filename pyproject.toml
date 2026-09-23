@@ -1,0 +1,53 @@
+[project]
+name = "laya-sdlc"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Brian Flannery", email = "brian@paradigmshiftdev.io" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.2.158",
+    "httpx>=0.28.1",
+    "laya>=0.3.11",
+    "pydantic>=2.13.5",
+    "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0.54",
+]
+
+[project.scripts]
+laya-sdlc = "laya_sdlc.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.8",
+    "types-pyyaml>=6.0.12.20260906",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["slow: needs the real Laya model or the Claude SDK/CLI"]
+addopts = "-m 'not slow'"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+strict = true
+ignore_missing_imports = true
+packages = ["laya_sdlc"]
+mypy_path = "src"

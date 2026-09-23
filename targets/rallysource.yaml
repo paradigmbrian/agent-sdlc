@@ -1,0 +1,47 @@
+name: rallysource
+ado:
+  org: MilesThurman
+  project: CodvoMigration
+  repo: RallySource
+  intake_tag: laya
+  parked_tag: "laya:parked"
+  base_branch: dev
+  branch_prefix: laya/
+repo:
+  install: npm ci
+  commands:
+    test: npm run test --workspace=apps/rallysource-api
+    lint: npm run lint
+    typecheck: npm run type-check --workspace=apps/rallysource-web --workspace=apps/rallysource-teams
+    build: npm run build
+  command_timeout_s: 1200
+  env_template: null
+policy:
+  protected_paths:
+    - "**/prisma/migrations/**"
+    - "**/prisma/schema.prisma"
+    - "infra/**"
+    - "azure-pipelines*.yml"
+    - "Dockerfile*"
+    - ".env*"
+    - "**/.env*"
+    - ".husky/**"
+    - "**/*.pem"
+    - "**/*.key"
+    - "sonar-project.properties"
+  max_diff_lines: 600
+limits:
+  max_concurrent_items: 1
+  max_verify_retries: 3
+  max_pr_rounds: 3
+  max_turns: {plan: 30, implement: 80, review: 30}
+  max_item_tokens: 2000000
+  max_daily_agent_turns: 400
+  max_daily_tokens: 20000000
+  run_window: null
+auth:
+  mode: subscription
+laya:
+  model: auto
+  max_ece: 0.10
+  default_threshold: 0.8
