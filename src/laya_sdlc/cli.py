@@ -15,14 +15,16 @@ from laya_sdlc.store import Store
 from laya_sdlc.targets import TargetConfig, load_target
 
 _DEFAULT_DB = f"sqlite:///{Path('~/.laya-sdlc/state.db').expanduser()}"
+# Defaults resolve from the project root, not the CWD (M12).
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="laya-sdlc")
-    p.add_argument("--target", default=os.environ.get("LAYA_SDLC_TARGET",
-                                                       "targets/rallysource.yaml"))
+    p.add_argument("--target", default=os.environ.get(
+        "LAYA_SDLC_TARGET", str(_ROOT / "targets" / "rallysource.yaml")))
     p.add_argument("--db", default=os.environ.get("LAYA_SDLC_DB", _DEFAULT_DB))
-    p.add_argument("--workspaces", default="workspaces")
+    p.add_argument("--workspaces", default=str(_ROOT / "workspaces"))
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
@@ -76,7 +78,7 @@ def _runtime(target: TargetConfig, store: Store, workspaces: Path,
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([target.repo.install, *target.repo.commands.values()])
     runner = ClaudeAgentRunner(pp, cp, Path("~/.laya-sdlc/claude-config").expanduser(), auth_env,
-                               should_stop=lambda: store.get_flag("paused") == "1")
+                               should_stop=lambda: store.get_flag("paused") == "1", home=ws.home)
     decider = Decider(LayaPredictor(target.laya.model), store.calibration,
                       target.laya.default_threshold)
     executor = StageExecutor(target=target, ado=ado, decider=decider, runner=runner,

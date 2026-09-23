@@ -99,3 +99,15 @@ def test_decider_uses_stored_calibration_per_question() -> None:
     assert out["plan_addresses_item"].actionable is True
     assert out["plan_scope_ok"].shadow is True and out["plan_scope_ok"].actionable is False
     assert pred.calls[0][1] is GATES["plan"]
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+def test_t4_digit_keyed_distribution_maps_by_int_order() -> None:
+    raw = {"score": 2, "distribution": {"2": 0.7, "1": 0.2, "0": 0.1}}
+    assert normalize_answer(SCORE, raw) == pytest.approx(
+        {"unclear": 0.1, "partly clear": 0.2, "clear": 0.7})
+    raw10 = {"score": 0, "distribution": {"10": 0.0, "2": 0.1, "1": 0.1, "0": 0.8}}
+    four = {"type": "score", "criteria": ["a", "b", "c", "d"]}
+    assert normalize_answer(four, raw10) == pytest.approx({"a": 0.8, "b": 0.1, "c": 0.1, "d": 0.0})

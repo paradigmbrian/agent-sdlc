@@ -39,6 +39,11 @@ def normalize_answer(qdef: dict[str, Any], raw: dict[str, Any]) -> dict[str, flo
     probs: dict[str, float]
     if isinstance(dist, dict) and set(keys) <= {str(k) for k in dist}:
         probs = {k: float(dist[k]) for k in keys}
+    elif isinstance(dist, dict) and len(dist) == len(keys) and all(
+            str(k).isdigit() for k in dist):
+        # Score levels keyed "0".."n": order by level, not by dict order (T4).
+        ordered = sorted(dist.items(), key=lambda kv: int(str(kv[0])))
+        probs = dict(zip(keys, (float(v) for _, v in ordered), strict=True))
     elif isinstance(dist, dict | list) and len(dist) == len(keys):
         values = list(dist.values()) if isinstance(dist, dict) else list(dist)
         probs = dict(zip(keys, (float(v) for v in values), strict=True))
