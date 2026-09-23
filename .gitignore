@@ -3,3 +3,4 @@ workspaces/
 __pycache__/
 *.db
 .env
+dist/
