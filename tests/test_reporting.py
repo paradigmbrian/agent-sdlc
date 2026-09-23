@@ -43,6 +43,35 @@ def test_park_comment_escapes_html() -> None:
     assert "laya:parked" in html and "red" in html
 
 
+def test_park_comment_gate_park_from_triage() -> None:
+    """NEEDS_HUMAN park from TRIAGE should mention approving/proceeding to plan."""
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
+                parked_from=Stage.TRIAGE, data={"park_note": "Unclear scope"})
+    html = park_comment_html(item)
+    assert "approving" in html or "proceeding" in html
+    assert "plan" in html
+    assert "retries" not in html
+
+
+def test_park_comment_red_park_from_verify() -> None:
+    """RED park from VERIFY should mention retrying verify, not gate approval."""
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.RED,
+                parked_from=Stage.VERIFY, data={"park_note": "Tests failed"})
+    html = park_comment_html(item)
+    assert "retry" in html
+    assert "verify" in html
+    assert "approving" not in html and "proceeding" not in html
+
+
+def test_park_comment_gate_park_from_implement() -> None:
+    """NEEDS_HUMAN park from IMPLEMENT should retry, not proceed to next gate stage."""
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
+                parked_from=Stage.IMPLEMENT, data={"park_note": "No changes"})
+    html = park_comment_html(item)
+    assert "retry" in html
+    assert "implement" in html
+
+
 def test_plan_comment_and_commit_message() -> None:
     assert "PR !42" in plan_comment_html("<b>x</b>", 42)
     assert "&lt;b&gt;" in plan_comment_html("<b>x</b>", 42)

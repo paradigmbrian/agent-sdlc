@@ -3,7 +3,7 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from laya_sdlc.types import Decision, Item, WorkItem
+from laya_sdlc.types import GATE_PARKS, Decision, Item, Stage, WorkItem
 
 MAX_PR_DESCRIPTION = 4000
 _TRUNCATED = "\n\n…(truncated; the full plan is in the work item comments)"
@@ -60,11 +60,25 @@ def park_comment_html(item: Item) -> str:
     reason = item.park_reason.value if item.park_reason else "unknown"
     stage = item.parked_from.value if item.parked_from else "unknown"
     note = html.escape(str(item.data.get("park_note", "")))
+
+    # Determine guidance based on park type
+    is_gate_park = item.park_reason in GATE_PARKS
+    is_gate_stage = item.parked_from in {Stage.TRIAGE, Stage.PLAN, Stage.REVIEW}
+
+    if is_gate_park and is_gate_stage and item.parked_from is not None:
+        next_stages = {Stage.TRIAGE: "plan", Stage.PLAN: "implement", Stage.REVIEW: "pr_open"}
+        next_stage = next_stages.get(item.parked_from, "unknown")
+        guidance = (f"To continue, update the item if needed and remove the "
+                    f"<code>laya:parked</code> tag to approve proceeding to the <code>{next_stage}"
+                    f"</code> stage.")
+    else:
+        guidance = (f"To continue, update the item if needed and remove the "
+                    f"<code>laya:parked</code> tag to retry the <code>{stage}</code> stage with "
+                    f"fresh retry counters.")
+
     return (f"<p><b>laya-sdlc parked this item</b> at stage <code>{stage}</code> "
             f"(reason: <code>{reason}</code>).</p><pre>{note}</pre>"
-            "<p>To continue, update the item if needed and remove the <code>laya:parked</code> "
-            "tag. For a gate park (triage/plan/review), removing the tag approves proceeding "
-            "past that gate.</p>")
+            f"<p>{guidance}</p>")
 
 
 def plan_comment_html(plan: str, pr_id: int) -> str:
