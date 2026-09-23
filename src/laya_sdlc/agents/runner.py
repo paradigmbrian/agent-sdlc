@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -15,6 +16,9 @@ _USAGE_LIMIT = re.compile(r"usage limit|rate[_ ]limit|\b429\b|hit your limit|lim
                           re.IGNORECASE)
 # Secrets the orchestrator may hold that agent subprocesses must never see.
 _BLANKED = ("LAYA_SDLC_ADO_PAT", "AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN")
+# The two mutually exclusive Claude auth modes; whichever isn't in use must be blanked so an
+# inherited value can't silently override the auth_env the caller chose (ruling R11).
+_AUTH_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
 
 
 def parse_usage_limit(text: str) -> bool:
@@ -23,7 +27,17 @@ def parse_usage_limit(text: str) -> bool:
 
 def check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: CommandPolicy,
                tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    """Return a denial reason, or None to allow. Pure so it can be unit-tested."""
+    """Return a denial reason, or None to allow. Pure so it can be unit-tested. Fails closed:
+    any exception raised while evaluating policy (e.g. a NUL byte or a symlink loop in a path)
+    is treated as a denial rather than letting the call through."""
+    try:
+        return _check_tool(role, cwd, path_policy, command_policy, tool_name, tool_input)
+    except Exception as e:
+        return f"policy check failed: {type(e).__name__}: {e}"
+
+
+def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: CommandPolicy,
+                tool_name: str, tool_input: dict[str, Any]) -> str | None:
     if tool_name not in role.tools:
         return f"tool {tool_name} is not permitted for {role.name}"
     if tool_name in _WRITE_TOOLS:
@@ -35,12 +49,39 @@ def check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: C
         path = tool_input.get("path")
         return path_policy.check_read(str(path), cwd) if path else None
     if tool_name == "Bash":
-        return command_policy.check(str(tool_input.get("command", "")))
+        command = str(tool_input.get("command", ""))
+        reason = command_policy.check(command)
+        return reason if reason is not None else _bash_path_violation(command, cwd, path_policy)
+    return None
+
+
+def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> str | None:
+    """Deny Bash commands that reference a path outside the worktree, even when the command
+    itself (e.g. `cat`, `grep`) is allowlisted."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    for token in argv:
+        candidate = token
+        if candidate.startswith("-"):
+            if "=" not in candidate:
+                continue
+            candidate = candidate.split("=", 1)[1]
+        if not candidate:
+            continue
+        if candidate.startswith("/") or candidate.startswith("~"):
+            return f"path is outside the worktree: {token}"
+        if ".." in candidate.split("/") and path_policy.check_read(candidate, cwd) is not None:
+            return f"path is outside the worktree: {token}"
     return None
 
 
 def agent_env(config_dir: Path, auth_env: dict[str, str]) -> dict[str, str]:
     env = {k: "" for k in _BLANKED if k in os.environ}
+    for active, other in (_AUTH_VARS, _AUTH_VARS[::-1]):
+        if active in auth_env and other in os.environ:
+            env[other] = ""
     env.update({
         "CLAUDE_CONFIG_DIR": str(config_dir),
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
