@@ -99,7 +99,12 @@ class Scheduler:
 
     # intake & requeue ------------------------------------------------------
     def _intake(self) -> None:
-        for wi in self._ado.list_intake():
+        try:
+            intake = self._ado.list_intake()
+        except _INFRA_ERRORS as e:
+            log.warning("intake failed; skipping this tick: %s", e)
+            return
+        for wi in intake:
             if self._t.ado.parked_tag in wi.tags:
                 continue
             branch = f"{self._t.ado.branch_prefix}{wi.id}-{slugify(wi.title)}"
@@ -108,7 +113,12 @@ class Scheduler:
 
     def _requeue_untagged(self) -> None:
         for item in self._store.items(self._t.name, [Stage.PARKED]):
-            if not self._ado.has_tag(item.id, self._t.ado.parked_tag):
+            try:
+                tagged = self._ado.has_tag(item.id, self._t.ado.parked_tag)
+            except _INFRA_ERRORS as e:
+                log.warning("has_tag failed for #%s; leaving parked this tick: %s", item.id, e)
+                continue
+            if not tagged:
                 self.requeue_item(item.id)
 
     def _approval_labels(self, item_id: int, stages: tuple[Stage, ...],
@@ -129,7 +139,10 @@ class Scheduler:
         if item.park_reason in GATE_PARKS and item.parked_from in APPROVAL_LABELS:
             labels = self._approval_labels(item.id, (item.parked_from,), "human_requeue")
         self._store.commit_step(new, [], Usage(), self._clock().date(), labels)
-        self._ado.set_tag(item.id, self._t.ado.parked_tag, False)
+        try:
+            self._ado.set_tag(item.id, self._t.ado.parked_tag, False)
+        except _INFRA_ERRORS as e:
+            log.warning("clearing parked tag failed for #%s (idempotent cleanup): %s", item.id, e)
         log.info("requeued #%s -> %s", item.id, new.stage)
         return new
 

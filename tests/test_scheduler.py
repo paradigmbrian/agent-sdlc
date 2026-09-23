@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 
@@ -30,6 +30,28 @@ class ScriptedExecutor:
         if isinstance(r, Exception):
             raise r
         return r
+
+
+@dataclass
+class RaisingAdo(FakeAdo):
+    """FakeAdo that raises an infra error from named methods (fix round 1, R15)."""
+
+    fail: set[str] = field(default_factory=set)
+
+    def list_intake(self) -> list[WorkItem]:
+        if "list_intake" in self.fail:
+            raise httpx.ConnectError("down")
+        return super().list_intake()
+
+    def has_tag(self, id: int, tag: str) -> bool:
+        if "has_tag" in self.fail:
+            raise httpx.ConnectError("down")
+        return super().has_tag(id, tag)
+
+    def set_tag(self, id: int, tag: str, present: bool) -> None:
+        if "set_tag" in self.fail:
+            raise httpx.ConnectError("down")
+        super().set_tag(id, tag, present)
 
 
 @pytest.fixture
@@ -165,3 +187,57 @@ async def test_done_cleans_up(env) -> None:  # type: ignore[no-untyped-def]
     assert store.get(5).stage is Stage.DONE
     assert not ws.worktree_path(5).exists()
     assert ado.deleted_branches == ["laya/5-add-feature"]
+
+
+async def test_intake_error_still_polls_and_steps(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    store = Store("sqlite://")
+    ado = RaisingAdo(fail={"list_intake"})
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", target)
+    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
+    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)),
+                          StepResult(Transition(Stage.PLAN)))
+    s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+                 clock=lambda: NOW)
+    await s.tick()  # list_intake() raises; intake skipped, rest of tick proceeds
+    assert [i.id for i in ex.seen] == [5, 6]
+
+
+async def test_has_tag_error_skips_item_others_continue(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    store = Store("sqlite://")
+    ado = RaisingAdo(fail={"has_tag"})
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", target)
+    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
+                       parked_from=Stage.TRIAGE))
+    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
+    s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+                 clock=lambda: NOW)
+    await s.tick()  # has_tag() raises for item 5; requeue skipped, item 6 still steps
+    assert [i.id for i in ex.seen] == [6]
+    assert store.get(5).stage is Stage.PARKED
+
+
+async def test_requeue_item_set_tag_error_still_requeues(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    store = Store("sqlite://")
+    ado = RaisingAdo(fail={"set_tag"})
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", target)
+    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
+                       parked_from=Stage.TRIAGE))
+    s = Scheduler(target=target, store=store, executor=ScriptedExecutor(), ado=ado, workspaces=ws,
+                 clock=lambda: NOW)
+    new = s.requeue_item(5)  # set_tag() raises; requeue still commits and no exception escapes
+    assert new.stage is Stage.PLAN
+    assert store.get(5).stage is Stage.PLAN
