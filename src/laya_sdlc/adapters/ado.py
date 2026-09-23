@@ -168,10 +168,13 @@ class AdoClient:
 
     def update_pr(self, pr_id: int, body: str) -> None:
         if self._dry_run:
+            log.info("dry-run: would update PR %s description", pr_id)
             return
         self._req("PATCH", f"{self._repo}/pullrequests/{pr_id}", json={"description": body})
 
     def pr_status(self, pr_id: int) -> str:
+        if self._dry_run:
+            return "active"
         return str(self._req("GET", f"{self._repo}/pullrequests/{pr_id}")["status"])
 
     def _self_identity(self) -> str:
@@ -181,6 +184,8 @@ class AdoClient:
         return self._self_id
 
     def pr_comments(self, pr_id: int) -> list[PrComment]:
+        if self._dry_run:
+            return []
         me = self._self_identity()
         out: list[PrComment] = []
         for thread in self._req("GET", f"{self._repo}/pullRequests/{pr_id}/threads")["value"]:
@@ -196,15 +201,24 @@ class AdoClient:
         return out
 
     def reply_pr(self, pr_id: int, thread_id: int, parent_comment_id: int, text: str) -> None:
+        if self._dry_run:
+            log.info("dry-run: would reply to PR %s thread %s: %s", pr_id, thread_id, text)
+            return
         self._req("POST", f"{self._repo}/pullRequests/{pr_id}/threads/{thread_id}/comments",
                   json={"content": text, "parentCommentId": parent_comment_id, "commentType": 1})
 
     def comment_pr(self, pr_id: int, text: str) -> None:
+        if self._dry_run:
+            log.info("dry-run: would comment on PR %s: %s", pr_id, text)
+            return
         self._req("POST", f"{self._repo}/pullRequests/{pr_id}/threads",
                   json={"comments": [{"content": text, "commentType": 1}], "status": 4})
 
     def delete_branch(self, branch: str) -> None:
         self._check_branch(branch)
+        if self._dry_run:
+            log.info("dry-run: would delete branch %s", branch)
+            return
         refs = self._req("GET", f"{self._repo}/refs", params={"filter": f"heads/{branch}"})
         match = [r for r in refs.get("value", []) if r["name"] == f"refs/heads/{branch}"]
         if not match:

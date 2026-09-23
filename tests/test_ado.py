@@ -5,7 +5,7 @@ import httpx
 import pytest
 import respx
 
-from laya_sdlc.adapters.ado import AdoClient, AdoError, html_to_text
+from laya_sdlc.adapters.ado import API, AdoClient, AdoError, html_to_text
 from laya_sdlc.secrets import SecretNotFound, basic_auth_header, get_secret
 from laya_sdlc.targets import AdoConfig, TargetConfig
 from laya_sdlc.workspaces import Workspaces
@@ -134,6 +134,76 @@ def test_pr_status_and_delete_branch(client: AdoClient) -> None:
     client.delete_branch("laya/5-x")
     assert json.loads(post.calls[0].request.content) == [
         {"name": "refs/heads/laya/5-x", "oldObjectId": "abc", "newObjectId": "0" * 40}]
+
+
+@respx.mock
+def test_list_closed_respects_limit(client: AdoClient) -> None:
+    wiql = respx.post(f"{PROJ}/wit/wiql").mock(
+        return_value=httpx.Response(200, json={"workItems": [{"id": 5}, {"id": 6}, {"id": 7}]}))
+    workitems = respx.get(f"{PROJ}/wit/workitems").mock(
+        return_value=httpx.Response(200, json={"value": [_wi(5), _wi(6)]}))
+    items = client.list_closed(2)
+    assert [i.id for i in items] == [5, 6]
+    query = json.loads(wiql.calls[0].request.content)["query"]
+    assert "IN ('Closed', 'Done')" in query
+    assert workitems.calls[0].request.url.params["ids"] == "5,6"
+
+
+@respx.mock
+def test_comment_work_item_uses_preview_api(client: AdoClient) -> None:
+    route = respx.post(f"{PROJ}/wit/workItems/5/comments").mock(
+        return_value=httpx.Response(200, json={}))
+    client.comment_work_item(5, "<p>hi</p>")
+    req = route.calls[0].request
+    assert req.url.params["api-version"] == "7.1-preview.4"
+    assert json.loads(req.content) == {"text": "<p>hi</p>"}
+
+
+@respx.mock
+def test_has_tag_true_and_false(client: AdoClient) -> None:
+    respx.get(f"{PROJ}/wit/workitems").mock(
+        return_value=httpx.Response(200, json={"value": [_wi(5, tags="laya; laya:parked")]}))
+    assert client.has_tag(5, "laya:parked") is True
+    assert client.has_tag(5, "nope") is False
+
+
+@respx.mock
+def test_update_pr_patches_description(client: AdoClient) -> None:
+    route = respx.patch(f"{REPO}/pullrequests/42").mock(return_value=httpx.Response(200, json={}))
+    client.update_pr(42, "new body")
+    req = route.calls[0].request
+    assert req.url.params["api-version"] == API
+    assert json.loads(req.content) == {"description": "new body"}
+
+
+@respx.mock
+def test_reply_pr_posts_comment(client: AdoClient) -> None:
+    route = respx.post(f"{REPO}/pullRequests/42/threads/7/comments").mock(
+        return_value=httpx.Response(200, json={}))
+    client.reply_pr(42, 7, 3, "thanks")
+    assert json.loads(route.calls[0].request.content) == {
+        "content": "thanks", "parentCommentId": 3, "commentType": 1}
+
+
+@respx.mock
+def test_comment_pr_posts_new_thread(client: AdoClient) -> None:
+    route = respx.post(f"{REPO}/pullRequests/42/threads").mock(
+        return_value=httpx.Response(200, json={}))
+    client.comment_pr(42, "hello")
+    assert json.loads(route.calls[0].request.content) == {
+        "comments": [{"content": "hello", "commentType": 1}], "status": 4}
+
+
+@respx.mock
+def test_dry_run_pr_methods_make_no_http_calls() -> None:
+    client = AdoClient(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")),
+                       dry_run_push=True)
+    client.comment_pr(0, "x")
+    client.reply_pr(0, 1, 1, "x")
+    client.delete_branch("laya/5-x")
+    assert client.pr_status(0) == "active"
+    assert client.pr_comments(0) == []
+    assert respx.calls.call_count == 0
 
 
 def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
