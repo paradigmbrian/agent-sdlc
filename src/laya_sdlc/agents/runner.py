@@ -57,12 +57,14 @@ def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: 
 
 def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> str | None:
     """Deny Bash commands that reference a path outside the worktree, even when the command
-    itself (e.g. `cat`, `grep`) is allowlisted."""
+    itself (e.g. `cat`, `grep`) is allowlisted and even via a symlink that resolves outside.
+    argv[0] (the executable) is not path-checked, since an allowlisted target command may itself
+    be an absolute path (e.g. `/usr/local/bin/eslint`)."""
     try:
         argv = shlex.split(command)
     except ValueError:
         return None
-    for token in argv:
+    for token in argv[1:]:
         candidate = token
         if candidate.startswith("-"):
             if "=" not in candidate:
@@ -70,9 +72,9 @@ def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> st
             candidate = candidate.split("=", 1)[1]
         if not candidate:
             continue
-        if candidate.startswith("/") or candidate.startswith("~"):
+        if candidate.startswith("~"):
             return f"path is outside the worktree: {token}"
-        if ".." in candidate.split("/") and path_policy.check_read(candidate, cwd) is not None:
+        if path_policy.check_read(candidate, cwd) is not None:
             return f"path is outside the worktree: {token}"
     return None
 

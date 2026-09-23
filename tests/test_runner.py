@@ -76,6 +76,32 @@ def test_check_tool_bash_no_path_escape(tmp_path: Path) -> None:
     assert chk("npm run lint") is None
 
 
+def test_check_tool_bash_symlink_escape(tmp_path: Path) -> None:
+    root = tmp_path / "wt"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("s")
+    (root / "link").symlink_to(outside)
+
+    reason = check_tool(IMPLEMENTER, root, PathPolicy([]), CommandPolicy(["cat"]), "Bash",
+                        {"command": "cat link/secret.txt"})
+    assert reason == "path is outside the worktree: link/secret.txt"
+
+
+def test_check_tool_bash_allows_allowlisted_absolute_executable(tmp_path: Path) -> None:
+    cp = CommandPolicy(["/usr/local/bin/eslint ."])
+    assert check_tool(IMPLEMENTER, tmp_path, PP, cp, "Bash",
+                      {"command": "/usr/local/bin/eslint ."}) is None
+
+
+def test_check_tool_bash_denies_flag_equals_path(tmp_path: Path) -> None:
+    cp = CommandPolicy(["npm run lint"])
+    reason = check_tool(IMPLEMENTER, tmp_path, PP, cp, "Bash",
+                        {"command": "npm run lint --config=/etc/x"})
+    assert reason == "path is outside the worktree: --config=/etc/x"
+
+
 def test_agent_env_isolates_config(tmp_path: Path) -> None:
     env = agent_env(tmp_path / "cfg", {"CLAUDE_CODE_OAUTH_TOKEN": "t"})
     assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / "cfg")
