@@ -11,7 +11,7 @@ import httpx
 from laya_sdlc.secrets import basic_auth_header
 from laya_sdlc.targets import AdoConfig
 from laya_sdlc.types import PrComment, WorkItem
-from laya_sdlc.workspaces import safe_env
+from laya_sdlc.workspaces import git_env
 
 log = logging.getLogger(__name__)
 API = "7.1"
@@ -149,7 +149,7 @@ class AdoClient:
             ["git", "-c", f"http.extraheader={self._auth_header}", "push", self._push_url,
              f"HEAD:refs/heads/{branch}"],
             cwd=worktree, capture_output=True, text=True,
-            env=safe_env({"GIT_TERMINAL_PROMPT": "0"}))
+            env=git_env())
         if r.returncode != 0:
             raise AdoError(f"push failed: {r.stderr.strip()}")
 

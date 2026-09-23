@@ -15,7 +15,14 @@ from laya_sdlc.agents.roles import (
 )
 from laya_sdlc.agents.runner import ClaudeAgentRunner, agent_env, check_tool, parse_usage_limit
 from laya_sdlc.policy import CommandPolicy, PathPolicy
-from laya_sdlc.types import AgentInterrupted, CommandResult, Usage, UsageLimitError, WorkItem
+from laya_sdlc.types import (
+    AgentInfraError,
+    AgentInterrupted,
+    CommandResult,
+    Usage,
+    UsageLimitError,
+    WorkItem,
+)
 
 PP = PathPolicy(["infra/**", "**/.env*"])
 CP = CommandPolicy(["npm test"])
@@ -185,11 +192,33 @@ def _install_fake_sdk(
 
     class ResultMessage:
         def __init__(self, is_error: bool = False, num_turns: int = 0,
-                    usage: dict[str, Any] | None = None, result: str | None = None) -> None:
+                    usage: dict[str, Any] | None = None, result: str | None = None,
+                    subtype: str = "success", api_error_status: int | None = None) -> None:
             self.is_error = is_error
             self.num_turns = num_turns
             self.usage = usage
             self.result = result
+            self.subtype = subtype
+            self.api_error_status = api_error_status
+
+    class RateLimitInfo:
+        def __init__(self, status: str, resets_at: int | None = None) -> None:
+            self.status = status
+            self.resets_at = resets_at
+
+    class RateLimitEvent:
+        def __init__(self, rate_limit_info: Any) -> None:
+            self.rate_limit_info = rate_limit_info
+
+    class ClaudeSDKError(Exception):
+        pass
+
+    class ResultError(ClaudeSDKError):
+        def __init__(self, message: str, data: dict[str, Any] | None = None) -> None:
+            data = data or {}
+            self.subtype = data.get("subtype")
+            self.api_error_status = data.get("api_error_status")
+            super().__init__(message)
 
     class ClaudeSDKClient:
         def __init__(self, options: Any = None) -> None:
@@ -228,11 +257,16 @@ def _install_fake_sdk(
     sdk.AssistantMessage = AssistantMessage  # type: ignore[attr-defined]
     sdk.ResultMessage = ResultMessage  # type: ignore[attr-defined]
     sdk.ClaudeSDKClient = ClaudeSDKClient  # type: ignore[attr-defined]
+    sdk.RateLimitInfo = RateLimitInfo  # type: ignore[attr-defined]
+    sdk.RateLimitEvent = RateLimitEvent  # type: ignore[attr-defined]
+    sdk.ClaudeSDKError = ClaudeSDKError  # type: ignore[attr-defined]
+    sdk.ResultError = ResultError  # type: ignore[attr-defined]
 
     sdk_types = types.ModuleType("claude_agent_sdk.types")
     sdk_types.HookContext = object  # type: ignore[attr-defined]
     sdk_types.HookInput = object  # type: ignore[attr-defined]
     sdk_types.SyncHookJSONOutput = dict  # type: ignore[attr-defined]
+    sdk_types.SandboxSettings = dict  # type: ignore[attr-defined]
 
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk)
     monkeypatch.setitem(sys.modules, "claude_agent_sdk.types", sdk_types)
@@ -261,11 +295,12 @@ def test_run_builds_options_and_maps_result(
     assert opts.setting_sources == []
     assert opts.strict_mcp_config is True
     assert opts.max_turns == 4
-    assert opts.env == agent_env(tmp_path / "cfg", auth_env)
+    assert opts.env == agent_env(tmp_path / "cfg", auth_env, tmp_path / "agent-home")
     assert captured["prompt"] == "do the thing"
 
     assert result.text == "done"
-    assert result.usage == Usage(turns=3, input_tokens=13, output_tokens=5)
+    # I4: cache reads are tracked separately and excluded from input_tokens.
+    assert result.usage == Usage(turns=3, input_tokens=12, output_tokens=5, cache_read_tokens=1)
     assert result.is_error is False
     assert result.denied == ()
 
@@ -344,5 +379,171 @@ def test_run_without_result_message_raises(
     script.append(sdk.AssistantMessage([sdk.TextBlock("hi")]))
 
     runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
-    with pytest.raises(RuntimeError, match="agent session ended without a result"):
+    with pytest.raises(AgentInfraError, match="agent session ended without a result"):
         asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+def test_c2_agent_env_neutralizes_all_inherited_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = agent_env(tmp_path / "cfg", {"CLAUDE_CODE_OAUTH_TOKEN": "t"}, tmp_path / "home")
+    assert env["SSH_AUTH_SOCK"] == "" and env["AWS_SECRET_ACCESS_KEY"] == ""
+    assert env["GITHUB_TOKEN"] == ""
+    assert "PATH" not in env  # allowlisted: inherited unchanged
+    assert env["HOME"] == str(tmp_path / "home")
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "t"
+    import os
+    leaked = {k for k in os.environ if k not in env} - {
+        "PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER", "TERM", "NVM_DIR", "NVM_BIN",
+        "CLAUDE_CODE_ENTRYPOINT"}
+    assert leaked == set()
+
+
+def test_c2_run_enables_sdk_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ResultMessage(num_turns=1, result="ok", usage={}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, home=tmp_path / "h")
+    asyncio.run(runner.run(PLANNER, "p", tmp_path, max_turns=2))
+    assert captured["options"].sandbox == {
+        "enabled": True,
+        "autoAllowBashIfSandboxed": False,
+        "allowUnsandboxedCommands": False,
+        "excludedCommands": [],
+        "network": {"allowedDomains": [], "allowUnixSockets": [], "allowAllUnixSockets": False,
+                    "allowLocalBinding": False},
+    }
+    assert captured["options"].env["HOME"] == str(tmp_path / "h")
+    assert (tmp_path / "h").is_dir()
+
+
+@pytest.mark.parametrize("cmd", [
+    "rg --pre sh -e x f", "rg --pre=sh x", "rg --pre-glob '*' --pre cat x",
+    "tree -o .env", "tree -R", "tree -aR", "tree --fromfile list", "tree -ofoo",
+])
+def test_c2_rg_pre_and_tree_output_denied(tmp_path: Path, cmd: str) -> None:
+    assert check_tool(PLANNER, tmp_path, PP, CP, "Bash", {"command": cmd}) is not None
+
+
+@pytest.mark.parametrize("cmd", [
+    "find . -fprint out", "find . -fprintf out x", "find . -fls out", "find . -fprint0 out",
+])
+def test_c2_find_file_output_actions_denied(tmp_path: Path, cmd: str) -> None:
+    assert check_tool(PLANNER, tmp_path, PP, CP, "Bash", {"command": cmd}) is not None
+
+
+def test_c2_plain_rg_and_tree_still_allowed(tmp_path: Path) -> None:
+    for cmd in ("rg -n TODO src", "tree -a src", "tree -L 2"):
+        assert check_tool(PLANNER, tmp_path, PP, CP, "Bash", {"command": cmd}) is None, cmd
+
+
+def test_m3_glob_pattern_is_path_checked(tmp_path: Path) -> None:
+    def chk(inp: dict[str, Any]) -> str | None:
+        return check_tool(PLANNER, tmp_path, PP, CP, "Glob", inp)
+
+    assert chk({"pattern": "/etc/*"}) == "path is outside the worktree"
+    assert chk({"pattern": "../**/*.env"}) == "path is outside the worktree"
+    assert chk({"pattern": "src/../../*"}) == "path is outside the worktree"
+    assert chk({"pattern": "~/.ssh/*"}) == "path is outside the worktree"
+    assert chk({"pattern": "**/*.py"}) is None
+    assert chk({"pattern": "src/../*.py"}) is None
+
+
+@pytest.mark.parametrize("text", ["There is a rate limiting bug", "limit reached in loop"])
+def test_i2_is_error_without_429_is_not_usage_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ResultMessage(is_error=True, num_turns=2, result=text,
+                                    subtype="error_during_execution",
+                                    usage={"input_tokens": 7, "output_tokens": 3}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+    assert res.is_error and res.error == "error_during_execution"
+    assert res.usage == Usage(2, 7, 3)
+
+
+def test_i2_api_error_status_429_raises_with_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ResultMessage(is_error=True, num_turns=2, result="API Error",
+                                    api_error_status=429,
+                                    usage={"input_tokens": 7, "output_tokens": 3}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(UsageLimitError) as ei:
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+    assert ei.value.usage == Usage(2, 7, 3) and ei.value.reset_at is None
+
+
+def test_m11_rate_limit_event_reset_time_is_used(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.RateLimitEvent(sdk.RateLimitInfo("rejected", resets_at=1760000000)))
+    script.append(sdk.ResultMessage(is_error=True, num_turns=1, result="API Error",
+                                    api_error_status=429, usage={}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(UsageLimitError) as ei:
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+    assert ei.value.reset_at == datetime.fromtimestamp(1760000000, UTC)
+
+
+def test_m11_usage_limit_text_reset_time_is_parsed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ResultMessage(is_error=True, num_turns=1,
+                                    result="Claude AI usage limit reached|1760000000", usage={}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(UsageLimitError) as ei:
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+    assert ei.value.reset_at == datetime.fromtimestamp(1760000000, UTC)
+
+
+def test_i1_sdk_errors_become_agent_infra_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ClaudeSDKError("CLI connection lost"))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(AgentInfraError, match="CLI connection lost"):
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+
+
+def test_i2_result_error_with_429_status_is_usage_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script.append(sdk.ResultError("Claude Code returned an error result: API Error",
+                                  {"api_error_status": 429}))
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(UsageLimitError):
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+
+
+@pytest.mark.parametrize("text", ["rate limit", "limit reached", "Rate limiting bug in foo"])
+def test_i2_parse_usage_limit_is_narrow(text: str) -> None:
+    assert parse_usage_limit(text) is False

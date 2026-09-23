@@ -116,3 +116,12 @@ def test_exact_target_command_with_operators_is_allowed() -> None:
     pol = CommandPolicy(["npm ci && npm run build"])
     assert pol.check("npm ci && npm run build") is None
     assert pol.check("npm ci && npm run build; rm x") is not None
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", ["DOCKERFILE", "dockerfile.api", ".ENV", "apps/x/.Env.local",
+                                  "INFRA/x", "Infra/main.bicep", ".GIT/config", "certs/k.PEM"])
+def test_m2_protected_matching_is_case_insensitive(path: str) -> None:
+    assert PathPolicy(PROTECTED).is_protected(path)

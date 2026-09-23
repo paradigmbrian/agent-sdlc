@@ -53,29 +53,32 @@ class WorkItem:
 @dataclass(frozen=True)
 class Usage:
     turns: int = 0
-    input_tokens: int = 0
+    input_tokens: int = 0         # uncached input + cache creation
     output_tokens: int = 0
+    cache_read_tokens: int = 0    # reported separately; not counted against budgets
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             self.turns + other.turns,
             self.input_tokens + other.input_tokens,
             self.output_tokens + other.output_tokens,
+            self.cache_read_tokens + other.cache_read_tokens,
         )
 
     @property
     def tokens(self) -> int:
+        """Budgeted tokens: input (incl. cache creation) + output, excluding cache reads."""
         return self.input_tokens + self.output_tokens
 
     def to_dict(self) -> dict[str, int]:
         return {"turns": self.turns, "input_tokens": self.input_tokens,
-                "output_tokens": self.output_tokens}
+                "output_tokens": self.output_tokens, "cache_read_tokens": self.cache_read_tokens}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> Usage:
         d = d or {}
         return cls(int(d.get("turns", 0)), int(d.get("input_tokens", 0)),
-                   int(d.get("output_tokens", 0)))
+                   int(d.get("output_tokens", 0)), int(d.get("cache_read_tokens", 0)))
 
 
 @dataclass(frozen=True)
@@ -148,15 +151,22 @@ class AgentResult:
     usage: Usage
     denied: tuple[str, ...] = ()
     is_error: bool = False
+    error: str = ""                # result subtype when is_error (e.g. "error_max_turns")
 
 
 class UsageLimitError(Exception):
     """The model provider refused work because a usage/rate limit window is exhausted."""
 
-    def __init__(self, message: str, reset_at: datetime | None = None) -> None:
+    def __init__(self, message: str, reset_at: datetime | None = None,
+                 usage: Usage | None = None) -> None:
         super().__init__(message)
         self.reset_at = reset_at
+        self.usage = usage or Usage()  # spent before the limit hit; still counts
 
 
 class AgentInterrupted(Exception):
     """The kill switch interrupted an agent session; the stage should be retried later."""
+
+
+class AgentInfraError(Exception):
+    """The agent SDK/CLI failed (connection, process or missing result); retried with backoff."""

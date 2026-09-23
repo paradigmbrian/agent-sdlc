@@ -3,11 +3,12 @@ from __future__ import annotations
 import html
 from typing import Any
 
-from laya_sdlc.types import GATE_PARKS, Decision, Item, Stage, WorkItem
+from laya_sdlc.types import GATE_PARKS, Decision, Item, ParkReason, Stage, WorkItem
 
 MAX_PR_DESCRIPTION = 4000
 _TRUNCATED = "\n\n…(truncated; the full plan is in the work item comments)"
 _PREFIX = {"Bug": "fix", "Task": "chore"}
+_PARK_DETAIL_CHARS = 6000
 
 QUESTION_REPLY = ("Thanks — I only act on change requests automatically. If you want a code "
                   "change, reply starting with `/laya` and describe it.")
@@ -45,7 +46,8 @@ def pr_body(item: Item, wi: WorkItem, decisions: list[Decision], checks: list[di
         "## Checks\n" + (check_lines or "(none)"),
         "## Laya decisions\n| gate | answer | confidence |\n|---|---|---|\n"
         + "\n".join(_decision_line(d) for d in latest.values()),
-        f"## Usage\n{u.turns} turns · {u.tokens:,} tokens · verify retries {item.attempt} · "
+        f"## Usage\n{u.turns} turns · {u.tokens:,} tokens "
+        f"(+{u.cache_read_tokens:,} cache-read tokens) · verify retries {item.attempt} · "
         f"PR rounds {item.pr_rounds}",
         "## Review notes\n" + (review_notes or "(none)"),
         "## Plan\n" + str(item.data.get("plan", "")),
@@ -72,13 +74,29 @@ def park_comment_html(item: Item) -> str:
                     f"<code>laya:parked</code> tag to approve proceeding to the <code>{next_stage}"
                     f"</code> stage.")
     else:
+        retry = "implement" if item.park_reason is ParkReason.PR_ROUNDS else stage
         guidance = (f"To continue, update the item if needed and remove the "
-                    f"<code>laya:parked</code> tag to retry the <code>{stage}</code> stage with "
+                    f"<code>laya:parked</code> tag to retry the <code>{retry}</code> stage with "
                     f"fresh retry counters.")
 
     return (f"<p><b>laya-sdlc parked this item</b> at stage <code>{stage}</code> "
             f"(reason: <code>{reason}</code>).</p><pre>{note}</pre>"
-            f"<p>{guidance}</p>")
+            f"{_park_detail(item)}<p>{guidance}</p>")
+
+
+def _park_detail(item: Item) -> str:
+    """The artifact a human must judge before approving: the plan or the review notes (I3)."""
+    if item.parked_from is Stage.PLAN:
+        title, text = "Plan", str(item.data.get("plan", ""))
+    elif item.parked_from is Stage.REVIEW:
+        title, text = "Review notes", str(item.data.get("review_notes", ""))
+    else:
+        return ""
+    if not text:
+        return ""
+    if len(text) > _PARK_DETAIL_CHARS:
+        text = text[:_PARK_DETAIL_CHARS] + "\n…(truncated)"
+    return f"<p><b>{title}</b>:</p><pre>{html.escape(text)}</pre>"
 
 
 def plan_comment_html(plan: str, pr_id: int) -> str:

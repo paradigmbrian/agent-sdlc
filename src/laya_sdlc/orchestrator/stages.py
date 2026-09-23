@@ -24,6 +24,7 @@ from laya_sdlc.orchestrator.reporting import (
 from laya_sdlc.orchestrator.transitions import (
     CommentOutcome,
     Transition,
+    after_agent_error,
     after_implement,
     after_plan,
     after_pr_poll,
@@ -37,7 +38,7 @@ from laya_sdlc.policy import PathPolicy
 from laya_sdlc.ports import AdoPort, AgentRunner, DeciderPort, WorkspacePort
 from laya_sdlc.store import LabelInput
 from laya_sdlc.targets import TargetConfig
-from laya_sdlc.types import CommandResult, Decision, Item, ParkReason, Stage, Usage
+from laya_sdlc.types import AgentResult, CommandResult, Decision, Item, ParkReason, Stage, Usage
 
 
 @dataclass
@@ -85,6 +86,14 @@ class StageExecutor:
     def _turns(self, stage: str) -> int:
         return self._t.limits.max_turns.get(stage, 30)
 
+    def _agent_failed(self, item: Item, res: AgentResult) -> StepResult | None:
+        """An agent error result (max turns, execution error) is a failed attempt (I2)."""
+        if not res.is_error:
+            return None
+        t = after_agent_error(item.stage, res.error, item.attempt,
+                              self._t.limits.max_verify_retries)
+        return StepResult(t, res.usage)
+
     async def _triage(self, item: Item) -> StepResult:
         state = triage_state(self._ado.get_work_item(item.id))
         ds = self._decider.decide("triage", state)
@@ -95,6 +104,8 @@ class StageExecutor:
         wt = self._ws.create(item.id, item.branch)
         res = await self._runner.run(PLANNER, planner_prompt(wi, item.data.get("feedback")), wt,
                                      self._turns("plan"))
+        if failed := self._agent_failed(item, res):
+            return failed
         state = {"work_item": work_item_text(wi), "plan": res.text[:6000]}
         ds = self._decider.decide("plan", state)
         return StepResult(after_plan(ds, item.replans), res.usage, _logged(ds, state),
@@ -112,6 +123,8 @@ class StageExecutor:
             IMPLEMENTER, implementer_prompt(wi, str(item.data.get("plan", "")),
                                             item.data.get("feedback")),
             wt, self._turns("implement"))
+        if failed := self._agent_failed(item, res):
+            return failed
         self._ws.commit(wt, commit_message(wi, item.pr_rounds))
         files = self._ws.changed_files(wt)
         t = after_implement(self._pp.violations(files), bool(files), self._ws.diff_lines(wt),
@@ -128,6 +141,11 @@ class StageExecutor:
                 return StepResult(park(
                     ParkReason.POLICY,
                     "Lint fixes touched protected paths: " + ", ".join(violations)))
+            lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
+            if lines > limit:  # M9
+                return StepResult(park(
+                    ParkReason.POLICY,
+                    f"After lint fixes the diff is {lines} lines, over the {limit}-line limit."))
         t = after_verify(results, item.attempt, self._t.limits.max_verify_retries)
         return StepResult(t, data={"checks": [_check_dict(r) for r in results]})
 
@@ -138,6 +156,8 @@ class StageExecutor:
         plan = str(item.data.get("plan", ""))
         res = await self._runner.run(REVIEWER, reviewer_prompt(wi, plan, self._ws.diff(wt), checks),
                                      wt, self._turns("review"))
+        if failed := self._agent_failed(item, res):
+            return failed
         state = {"work_item": work_item_text(wi, 3000), "plan": plan[:3000],
                  "review_notes": res.text[:6000]}
         ds = self._decider.decide("review", state)
@@ -160,8 +180,9 @@ class StageExecutor:
             pr_id = item.pr_id
         else:
             pr_id = self._ado.create_pr(item.branch, pr_title(wi), body, item.id)
-            self._ado.comment_work_item(item.id, plan_comment_html(str(item.data.get("plan", "")),
-                                                                   pr_id))
+            if pr_id:  # dry-run returns 0: there is no PR to point at (M6)
+                self._ado.comment_work_item(
+                    item.id, plan_comment_html(str(item.data.get("plan", "")), pr_id))
         return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id)
 
     async def _awaiting(self, item: Item) -> StepResult:

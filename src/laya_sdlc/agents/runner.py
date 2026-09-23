@@ -4,25 +4,44 @@ import os
 import re
 import shlex
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from laya_sdlc.agents.roles import Role
 from laya_sdlc.policy import CommandPolicy, PathPolicy
-from laya_sdlc.types import AgentInterrupted, AgentResult, Usage, UsageLimitError
+from laya_sdlc.types import AgentInfraError, AgentInterrupted, AgentResult, Usage, UsageLimitError
 
 _WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
-_USAGE_LIMIT = re.compile(r"usage limit|rate[_ ]limit|\b429\b|hit your limit|limit reached",
-                          re.IGNORECASE)
-# Secrets the orchestrator may hold that agent subprocesses must never see.
-_BLANKED = ("LAYA_SDLC_ADO_PAT", "AZURE_DEVOPS_EXT_PAT", "SYSTEM_ACCESSTOKEN")
-# The two mutually exclusive Claude auth modes; whichever isn't in use must be blanked so an
-# inherited value can't silently override the auth_env the caller chose (ruling R11).
-_AUTH_VARS = ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+# Narrow on purpose (I2): only the provider's own usage/rate-limit wording or an HTTP 429 status,
+# never free text like "rate limiting" that could appear in an ordinary error result.
+_USAGE_LIMIT = re.compile(
+    r"usage limit reached|hit your limit|rate_limit_error"
+    r"|API Error: 429\b|status(?: code)?:? 429\b",
+    re.IGNORECASE)
+_RESET_EPOCH = re.compile(r"usage limit reached\|(\d{9,11})", re.IGNORECASE)
+# Inherited variables agent sessions may keep (C2). Everything else in os.environ is set to ""
+# because the SDK merges os.environ into the CLI's environment.
+_ENV_ALLOW = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "USER", "TERM", "NVM_DIR",
+                        "NVM_BIN", "CLAUDE_CODE_ENTRYPOINT"})
+# SDK sandbox for Bash (C2): no escape hatch, no network, no Unix sockets (e.g. ssh-agent).
+SANDBOX: dict[str, Any] = {
+    "enabled": True,
+    "autoAllowBashIfSandboxed": False,
+    "allowUnsandboxedCommands": False,
+    "excludedCommands": [],
+    "network": {"allowedDomains": [], "allowUnixSockets": [], "allowAllUnixSockets": False,
+                "allowLocalBinding": False},
+}
 
 
 def parse_usage_limit(text: str) -> bool:
     return bool(_USAGE_LIMIT.search(text or ""))
+
+
+def _reset_from_text(text: str) -> datetime | None:
+    m = _RESET_EPOCH.search(text or "")
+    return datetime.fromtimestamp(int(m.group(1)), UTC) if m else None
 
 
 def check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: CommandPolicy,
@@ -47,7 +66,15 @@ def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: 
         return path_policy.check_read(str(tool_input.get("file_path", "")), cwd)
     if tool_name in ("Glob", "Grep"):
         path = tool_input.get("path")
-        return path_policy.check_read(str(path), cwd) if path else None
+        if path and (reason := path_policy.check_read(str(path), cwd)) is not None:
+            return reason
+        pattern = str(tool_input.get("pattern", "")) if tool_name == "Glob" else ""
+        if pattern.startswith("~"):
+            return "path is outside the worktree"
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:  # M3
+            base = Path(str(path)) if path else cwd
+            return path_policy.check_read(str(base / pattern), cwd)
+        return None
     if tool_name == "Bash":
         command = str(tool_input.get("command", ""))
         reason = command_policy.check(command)
@@ -79,26 +106,31 @@ def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> st
     return None
 
 
-def agent_env(config_dir: Path, auth_env: dict[str, str]) -> dict[str, str]:
-    env = {k: "" for k in _BLANKED if k in os.environ}
-    for active, other in (_AUTH_VARS, _AUTH_VARS[::-1]):
-        if active in auth_env and other in os.environ:
-            env[other] = ""
+def agent_env(config_dir: Path, auth_env: dict[str, str],
+              home: Path | None = None) -> dict[str, str]:
+    """Environment overrides for an agent session. The SDK merges os.environ underneath these,
+    so every inherited variable outside _ENV_ALLOW is neutralized with "" (credentials such as
+    SSH_AUTH_SOCK, cloud keys, tokens and the unused Claude auth var). HOME is a scratch dir."""
+    env = {k: "" for k in os.environ if k not in _ENV_ALLOW}
     env.update({
         "CLAUDE_CONFIG_DIR": str(config_dir),
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
     })
+    if home is not None:
+        env["HOME"] = str(home)
     env.update(auth_env)
     return env
 
 
 class ClaudeAgentRunner:
     def __init__(self, path_policy: PathPolicy, command_policy: CommandPolicy, config_dir: Path,
-                 auth_env: dict[str, str], should_stop: Callable[[], bool] = lambda: False):
+                 auth_env: dict[str, str], should_stop: Callable[[], bool] = lambda: False,
+                 home: Path | None = None):
         self._pp = path_policy
         self._cp = command_policy
         self._config_dir = config_dir
+        self._home = home or config_dir.parent / "agent-home"
         self._auth_env = auth_env
         self._should_stop = should_stop
 
@@ -107,13 +139,21 @@ class ClaudeAgentRunner:
             AssistantMessage,
             ClaudeAgentOptions,
             ClaudeSDKClient,
+            ClaudeSDKError,
             HookMatcher,
+            RateLimitEvent,
             ResultMessage,
             TextBlock,
         )
-        from claude_agent_sdk.types import HookContext, HookInput, SyncHookJSONOutput
+        from claude_agent_sdk.types import (
+            HookContext,
+            HookInput,
+            SandboxSettings,
+            SyncHookJSONOutput,
+        )
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
+        self._home.mkdir(parents=True, exist_ok=True)
         denied: list[str] = []
 
         async def pre_tool_use(input_data: HookInput, tool_use_id: str | None,
@@ -140,10 +180,12 @@ class ClaudeAgentRunner:
             max_turns=max_turns,
             setting_sources=[],
             strict_mcp_config=True,
-            env=agent_env(self._config_dir, self._auth_env),
+            env=agent_env(self._config_dir, self._auth_env, self._home),
+            sandbox=cast(SandboxSettings, SANDBOX),
         )
         texts: list[str] = []
         result: Any = None
+        reset_at: datetime | None = None
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
@@ -153,25 +195,33 @@ class ClaudeAgentRunner:
                         raise AgentInterrupted(role.name)
                     if isinstance(msg, AssistantMessage):
                         texts += [b.text for b in msg.content if isinstance(b, TextBlock)]
+                    elif isinstance(msg, RateLimitEvent):
+                        info = msg.rate_limit_info
+                        if info.status == "rejected" and info.resets_at:  # M11
+                            reset_at = datetime.fromtimestamp(int(info.resets_at), UTC)
                     elif isinstance(msg, ResultMessage):
                         result = msg
         except AgentInterrupted:
             raise
         except Exception as e:
-            if parse_usage_limit(str(e)):
-                raise UsageLimitError(str(e)) from e
+            if getattr(e, "api_error_status", None) == 429 or parse_usage_limit(str(e)):
+                raise UsageLimitError(str(e), reset_at or _reset_from_text(str(e))) from e
+            if isinstance(e, ClaudeSDKError):
+                raise AgentInfraError(f"{role.name}: {type(e).__name__}: {e}") from e
             raise
         if result is None:
-            raise RuntimeError(f"{role.name}: agent session ended without a result")
+            raise AgentInfraError(f"{role.name}: agent session ended without a result")
         text = (getattr(result, "result", None) or (texts[-1] if texts else "")).strip()
-        if result.is_error and parse_usage_limit(text):
-            raise UsageLimitError(text)
         u = getattr(result, "usage", None) or {}
         usage = Usage(
             turns=int(getattr(result, "num_turns", 0) or 0),
             input_tokens=(int(u.get("input_tokens", 0))
-                         + int(u.get("cache_creation_input_tokens", 0))
-                         + int(u.get("cache_read_input_tokens", 0))),
+                         + int(u.get("cache_creation_input_tokens", 0))),
             output_tokens=int(u.get("output_tokens", 0)),
+            cache_read_tokens=int(u.get("cache_read_input_tokens", 0)),
         )
-        return AgentResult(text, usage, tuple(denied), bool(result.is_error))
+        if result.is_error and (getattr(result, "api_error_status", None) == 429
+                                or parse_usage_limit(text)):
+            raise UsageLimitError(text, reset_at or _reset_from_text(text), usage)
+        error = str(getattr(result, "subtype", "") or "error") if result.is_error else ""
+        return AgentResult(text, usage, tuple(denied), bool(result.is_error), error)

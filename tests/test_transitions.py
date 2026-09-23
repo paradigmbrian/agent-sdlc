@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from laya_sdlc.orchestrator.transitions import (
@@ -139,3 +141,32 @@ def test_requeue_budget_resets_budget_offset() -> None:
     parked = apply_transition(Item(1, "t", "x", "b", Stage.IMPLEMENT, usage=Usage(5, 900, 100)),
                               park(ParkReason.BUDGET, "b"))
     assert requeue(parked).data["budget_offset"] == 1000
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+def test_i5_pr_rounds_park_keeps_feedback_and_requeues_to_implement() -> None:
+    c = PrComment(1, 1, "Brian", "/laya rename foo")
+    t = after_pr_poll("active", [CommentOutcome(c, "change_request")], 3, 3)
+    assert t.park_reason is ParkReason.PR_ROUNDS and "/laya rename foo" in (t.feedback or "")
+    waiting = Item(1, "t", "x", "b", Stage.AWAITING_HUMAN, pr_rounds=3, pr_id=7)
+    parked = apply_transition(waiting, t)
+    assert "/laya rename foo" in parked.data["feedback"]
+    item = requeue(parked)
+    assert item.stage is Stage.IMPLEMENT and item.pr_rounds == 0
+    assert "/laya rename foo" in item.data["feedback"] and item.pr_id == 7
+
+
+def test_m1_confident_review_clears_stale_note() -> None:
+    stale = Item(1, "t", "x", "b", Stage.REVIEW, data={"note": "old concern", "plan": "p"})
+    item = apply_transition(stale, Transition(Stage.PR_OPEN))
+    assert "note" not in item.data and item.data["plan"] == "p"
+    kept = apply_transition(stale, Transition(Stage.PR_OPEN, note="new concern"))
+    assert kept.data["note"] == "new concern"
+
+
+def test_c1_requeue_drops_parked_tag_set() -> None:
+    parked = apply_transition(ITEM, park(ParkReason.NEEDS_HUMAN, "unclear"))
+    parked = replace(parked, data={**parked.data, "parked_tag_set": True})
+    assert "parked_tag_set" not in requeue(parked).data

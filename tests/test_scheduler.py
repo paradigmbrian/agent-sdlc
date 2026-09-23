@@ -11,7 +11,15 @@ from laya_sdlc.orchestrator.transitions import Transition, park
 from laya_sdlc.policy import PathPolicy
 from laya_sdlc.store import Store
 from laya_sdlc.targets import RunWindow, TargetConfig
-from laya_sdlc.types import Item, ParkReason, Stage, Usage, UsageLimitError, WorkItem
+from laya_sdlc.types import (
+    AgentInfraError,
+    Item,
+    ParkReason,
+    Stage,
+    Usage,
+    UsageLimitError,
+    WorkItem,
+)
 from laya_sdlc.workspaces import Workspaces
 from tests.fakes import FakeAdo, FakeDecider, FakeRunner
 
@@ -216,7 +224,7 @@ async def test_has_tag_error_skips_item_others_continue(  # type: ignore[no-unty
     ws = Workspaces(tmp_path / "ws", target)
     store.add_item("fixture", WI, "laya/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
-                       parked_from=Stage.TRIAGE))
+                       parked_from=Stage.TRIAGE, data={"parked_tag_set": True}))
     store.add_item("fixture", replace(WI, id=6), "laya/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
     s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
@@ -241,3 +249,145 @@ async def test_requeue_item_set_tag_error_still_requeues(  # type: ignore[no-unt
     new = s.requeue_item(5)  # set_tag() raises; requeue still commits and no exception escapes
     assert new.stage is Stage.PLAN
     assert store.get(5).stage is Stage.PLAN
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+@dataclass
+class FlakyAdo(FakeAdo):
+    """FakeAdo whose named methods raise an infra error for their next N calls."""
+
+    fail_counts: dict[str, int] = field(default_factory=dict)
+
+    def _maybe_fail(self, name: str) -> None:
+        if self.fail_counts.get(name, 0) > 0:
+            self.fail_counts[name] -= 1
+            raise httpx.ConnectError("blip")
+
+    def comment_work_item(self, id: int, html_text: str) -> None:
+        self._maybe_fail("comment_work_item")
+        super().comment_work_item(id, html_text)
+
+    def set_tag(self, id: int, tag: str, present: bool) -> None:
+        self._maybe_fail("set_tag")
+        super().set_tag(id, tag, present)
+
+
+def _flaky(tmp_path: Path, target: TargetConfig, ex: ScriptedExecutor,
+           **fails: int) -> tuple[Store, FlakyAdo, Scheduler]:
+    store = Store("sqlite://")
+    ado = FlakyAdo(fail_counts=dict(fails))
+    ado.add(WI)
+    s = Scheduler(target=target, store=store, executor=ex, ado=ado,
+                  workspaces=Workspaces(tmp_path / "ws", target), clock=lambda: NOW)
+    return store, ado, s
+
+
+async def test_c1_park_comment_failure_still_tags_and_is_not_requeued(
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
+    store, ado, s = _flaky(tmp_path, target, ex, comment_work_item=1)
+    await s.tick()
+    assert "laya:parked" in ado.tags[5]
+    assert store.get(5).data.get("parked_tag_set") is True
+    await s.tick()  # the tag is present: nothing is read as human approval
+    item = store.get(5)
+    assert item.stage is Stage.PARKED and len(ex.seen) == 1
+
+
+async def test_c1_park_set_tag_failure_is_retried_and_never_requeued(
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
+    store, ado, s = _flaky(tmp_path, target, ex, set_tag=2)
+    await s.tick()  # park; set_tag fails
+    assert "laya:parked" not in ado.tags[5] and "parked_tag_set" not in store.get(5).data
+    assert ado.wi_comments == []  # tag first, then comment
+    await s.tick()  # untagged but flag unset: retry side effects (fails again), no requeue
+    assert store.get(5).stage is Stage.PARKED and "laya:parked" not in ado.tags[5]
+    await s.tick()  # retry succeeds
+    item = store.get(5)
+    assert item.stage is Stage.PARKED and item.data.get("parked_tag_set") is True
+    assert "laya:parked" in ado.tags[5] and len(ado.wi_comments) == 1
+    assert len(ex.seen) == 1
+
+
+async def test_c1_removing_tag_after_successful_park_requeues(
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")),
+                          StepResult(Transition(Stage.IMPLEMENT)))
+    store, ado, s = _flaky(tmp_path, target, ex)
+    await s.tick()
+    ado.set_tag(5, "laya:parked", False)
+    await s.tick()
+    item = store.get(5)
+    assert item.stage is Stage.IMPLEMENT and "parked_tag_set" not in item.data
+
+
+@pytest.mark.parametrize("err", [RuntimeError("boom"), AgentInfraError("sdk died")])
+async def test_i1_any_executor_error_backs_off_then_parks_infra(
+    env, err: Exception  # type: ignore[no-untyped-def]
+) -> None:
+    store = env[0]
+    ex = ScriptedExecutor(err, err, err)
+    await sched(env, ex).tick()
+    item = store.get(5)
+    assert item.stage is Stage.TRIAGE and item.infra_failures == 1
+    assert item.data["retry_after"] == (NOW + timedelta(minutes=2)).isoformat()
+    for i in (1, 2):
+        await sched(env, ex, now=NOW + timedelta(hours=i)).tick()
+    item = store.get(5)
+    assert item.stage is Stage.PARKED and item.park_reason is ParkReason.INFRA
+    assert type(err).__name__ in item.data["park_note"]
+
+
+async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, ws, target = env
+    two = target.model_copy(update={"limits": target.limits.model_copy(
+        update={"max_concurrent_items": 2})})
+    for i in (5, 6):
+        store.add_item("fixture", replace(WI, id=i), f"laya/{i}-x")
+        store.save(replace(store.get(i), stage=Stage.IMPLEMENT))
+    ex = ScriptedExecutor(RuntimeError("boom"), StepResult(Transition(Stage.VERIFY)))
+    await Scheduler(target=two, store=store, executor=ex, ado=ado, workspaces=ws,
+                    clock=lambda: NOW).tick()
+    assert [i.id for i in ex.seen] == [5, 6]
+    assert store.get(5).infra_failures == 1 and store.get(6).stage is Stage.VERIFY
+
+
+async def test_i1_error_polling_awaiting_item_still_steps_active(  # type: ignore[no-untyped-def]
+    env
+) -> None:
+    store = env[0]
+    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
+    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    ex = ScriptedExecutor(KeyError("pr vanished"), StepResult(Transition(Stage.PLAN)))
+    await sched(env, ex).tick()
+    assert [i.id for i in ex.seen] == [5, 6]
+    assert store.get(5).infra_failures == 1 and store.get(6).stage is Stage.PLAN
+
+
+async def test_i2_usage_limit_records_usage(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    used = Usage(4, 500, 50, cache_read_tokens=9000)
+    ex = ScriptedExecutor(UsageLimitError("usage limit reached", usage=used))
+    await sched(env, ex).tick()
+    assert store.get(5).usage == used and store.get(5).stage is Stage.TRIAGE
+    assert store.daily_usage(NOW.date()).tokens == 550
+    assert store.get_flag("paused_until") == (NOW + timedelta(minutes=30)).isoformat()
+
+
+async def test_i4_cache_reads_do_not_trip_item_budget(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, ws, target = env
+    tight = target.model_copy(update={"limits": target.limits.model_copy(
+        update={"max_item_tokens": 100})})
+    ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN),
+                                     Usage(1, 50, 20, cache_read_tokens=1_000_000)))
+    await Scheduler(target=tight, store=store, executor=ex, ado=ado, workspaces=ws,
+                    clock=lambda: NOW).tick()
+    item = store.get(5)
+    assert item.stage is Stage.PLAN and item.usage.cache_read_tokens == 1_000_000

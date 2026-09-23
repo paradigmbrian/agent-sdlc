@@ -19,6 +19,7 @@ from laya_sdlc.targets import TargetConfig
 from laya_sdlc.types import (
     ACTIVE_STAGES,
     GATE_PARKS,
+    AgentInfraError,
     AgentInterrupted,
     Item,
     ParkReason,
@@ -113,6 +114,11 @@ class Scheduler:
 
     def _requeue_untagged(self) -> None:
         for item in self._store.items(self._t.name, [Stage.PARKED]):
+            if not item.data.get("parked_tag_set"):
+                # The park tag was never confirmed set, so a missing tag is not a human
+                # approval: retry the park side effects instead (C1).
+                self._park_side_effects(item)
+                continue
             try:
                 tagged = self._ado.has_tag(item.id, self._t.ado.parked_tag)
             except _INFRA_ERRORS as e:
@@ -154,13 +160,20 @@ class Scheduler:
         try:
             res = await self._executor.run(item)
         except UsageLimitError as e:
+            # Tokens spent before the limit hit still count toward item and daily budgets.
+            self._store.commit_step(replace(item, usage=item.usage + e.usage), [], e.usage,
+                                    now.date(), [])
             until = e.reset_at or (now + _DEFAULT_PAUSE)
             self._store.set_flag("paused_until", until.isoformat())
             log.warning("usage limit hit; pausing until %s", until)
             return
         except AgentInterrupted:
             return
-        except _INFRA_ERRORS as e:
+        except (*_INFRA_ERRORS, AgentInfraError) as e:
+            self._infra_failure(item, now, e)
+            return
+        except Exception as e:  # any per-item error backs off and eventually parks (I1)
+            log.exception("step failed for #%s", item.id)
             self._infra_failure(item, now, e)
             return
         new = apply_transition(item, res.transition)
@@ -192,15 +205,29 @@ class Scheduler:
         self._store.save(replace(item, infra_failures=n,
                                  data={**item.data, "retry_after": retry.isoformat()}))
 
-    def _side_effects(self, item: Item) -> None:
+    def _park_side_effects(self, item: Item) -> None:
+        """Tag first, and record that the tag is set, before commenting: only a confirmed tag
+        makes its later removal mean "a human approved" (C1)."""
         try:
-            if item.stage is Stage.PARKED:
-                self._ado.comment_work_item(item.id, park_comment_html(item))
-                self._ado.set_tag(item.id, self._t.ado.parked_tag, True)
-                if item.pr_id:
-                    self._ado.comment_pr(item.pr_id, f"laya-sdlc parked this item "
-                                         f"({item.park_reason}): {item.data.get('park_note', '')}")
-            elif item.stage in (Stage.DONE, Stage.CLOSED):
+            self._ado.set_tag(item.id, self._t.ado.parked_tag, True)
+        except _INFRA_ERRORS:
+            log.exception("setting the parked tag failed for #%s; will retry", item.id)
+            return
+        self._store.save(replace(item, data={**item.data, "parked_tag_set": True}))
+        try:
+            self._ado.comment_work_item(item.id, park_comment_html(item))
+            if item.pr_id:
+                self._ado.comment_pr(item.pr_id, f"laya-sdlc parked this item "
+                                     f"({item.park_reason}): {item.data.get('park_note', '')}")
+        except _INFRA_ERRORS:
+            log.exception("park comments failed for #%s", item.id)
+
+    def _side_effects(self, item: Item) -> None:
+        if item.stage is Stage.PARKED:
+            self._park_side_effects(item)
+            return
+        try:
+            if item.stage in (Stage.DONE, Stage.CLOSED):
                 self._ws.remove(item.id, item.branch)
                 if item.pr_id:
                     self._ado.delete_branch(item.branch)

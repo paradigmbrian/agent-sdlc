@@ -28,7 +28,8 @@ def _glob_to_regex(pattern: str) -> re.Pattern[str]:
         else:
             out.append(re.escape(pattern[i]))
             i += 1
-    return re.compile("".join(out) + r"\Z")
+    # Case-insensitive (M2): macOS/Windows filesystems treat DOCKERFILE and Dockerfile alike.
+    return re.compile("".join(out) + r"\Z", re.IGNORECASE)
 
 
 def _relative(path: str, root: Path) -> str | None:
@@ -50,7 +51,8 @@ class PathPolicy:
         self._patterns = [_glob_to_regex(p) for p in protected]
 
     def is_protected(self, rel: str) -> bool:
-        return rel == ".git" or rel.startswith(".git/") or any(
+        low = rel.lower()
+        return low == ".git" or low.startswith(".git/") or any(
             p.match(rel) for p in self._patterns)
 
     def violations(self, rel_paths: Iterable[str]) -> list[str]:
@@ -73,6 +75,22 @@ _READONLY = {"ls", "cat", "head", "tail", "wc", "grep", "rg", "pwd", "tree", "fi
 _FIND_SIDE_EFFECTS = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint",
                       "-fprintf", "-fls", "-fprint0"}
 _GIT_READONLY = {"status", "diff", "log", "show"}
+# rg --pre runs an arbitrary preprocessor command; tree -o/-R/--fromfile write files.
+_RG_EXEC = ("--pre", "--pre-glob")
+_TREE_WRITE_SHORT = set("oR")
+
+
+def _rg_exec(argv: list[str]) -> bool:
+    return any(a in _RG_EXEC or a.startswith(tuple(f"{f}=" for f in _RG_EXEC)) for a in argv)
+
+
+def _tree_writes(argv: list[str]) -> bool:
+    for a in argv[1:]:
+        if a == "--fromfile" or a.startswith("--fromfile="):
+            return True
+        if a.startswith("-") and not a.startswith("--") and _TREE_WRITE_SHORT & set(a[1:]):
+            return True
+    return False
 
 
 class CommandPolicy:
@@ -100,6 +118,10 @@ class CommandPolicy:
         head = argv[0]
         if head == "find" and _FIND_SIDE_EFFECTS & set(argv):
             return "find with side-effect actions is not allowed"
+        if head == "rg" and _rg_exec(argv):
+            return "rg --pre/--pre-glob is not allowed"
+        if head == "tree" and _tree_writes(argv):
+            return "tree -o/-R/--fromfile is not allowed"
         if head in _READONLY:
             return None
         if head == "git" and len(argv) > 1 and argv[1] in _GIT_READONLY:

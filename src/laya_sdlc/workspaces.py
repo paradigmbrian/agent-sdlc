@@ -10,9 +10,9 @@ from pathlib import Path
 from laya_sdlc.targets import TargetConfig
 from laya_sdlc.types import CommandResult
 
+# HOME is deliberately absent: repo commands and git get a scratch HOME (C2).
 _SAFE_ENV_KEYS = (
     "PATH",
-    "HOME",
     "LANG",
     "LC_ALL",
     "TMPDIR",
@@ -43,6 +43,17 @@ def safe_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def git_env(home: Path | None = None) -> dict[str, str]:
+    """Environment for orchestrator git plumbing: never reads the user's or system git config,
+    so credential helpers and url.insteadOf rewrites are not used (auth is the per-command
+    http.extraheader only)."""
+    extra = {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
+             "GIT_CONFIG_NOSYSTEM": "1"}
+    if home is not None:
+        extra["HOME"] = str(home)
+    return safe_env(extra)
+
+
 def _read_env_template(path: Path | None) -> dict[str, str]:
     if path is None:
         return {}
@@ -63,7 +74,9 @@ class Workspaces:
         self._t = target
         self._auth = git_auth_header
         self._base = self._root / "base"
-        self._cmd_env = safe_env(_read_env_template(target.repo.env_template))
+        self.home = self._root / "home"  # scratch HOME for repo commands and agent sessions
+        self._cmd_env = safe_env({**_read_env_template(target.repo.env_template),
+                                  "HOME": str(self.home)})
 
     def _git(
         self,
@@ -81,7 +94,7 @@ class Workspaces:
             cwd=cwd,
             capture_output=True,
             text=True,
-            env=safe_env({"GIT_TERMINAL_PROMPT": "0"}),
+            env=git_env(self.home),
         )
         if check and r.returncode != 0:
             raise GitError(f"git {args[0]} failed: {r.stderr.strip()}")
@@ -126,6 +139,7 @@ class Workspaces:
         self._git("clean", "-fd", cwd=wt)
 
     def run(self, name: str, command: str, wt: Path) -> CommandResult:
+        self.home.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
         try:
             # shell=True is deliberate: commands come only from the trusted target YAML,
@@ -157,7 +171,7 @@ class Workspaces:
         staged = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=wt,
-            env=safe_env(),
+            env=git_env(self.home),
         ).returncode
         if staged == 0:
             return False

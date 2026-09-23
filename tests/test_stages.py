@@ -129,3 +129,68 @@ async def test_awaiting_completed(parts) -> None:  # type: ignore[no-untyped-def
     pr = ado.create_pr("laya/5-add-feature", "t", "b", 5)
     ado.prs[pr]["status"] = "completed"
     assert (await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))).transition.to is Stage.DONE
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+def _failing(role: str):  # type: ignore[no-untyped-def]
+    return {role: lambda r, p, c: AgentResult("", Usage(2, 10, 1), is_error=True,
+                                              error="error_max_turns")}
+
+
+@pytest.mark.parametrize("stage,role", [(Stage.PLAN, "planner"),
+                                        (Stage.IMPLEMENT, "implementer"),
+                                        (Stage.REVIEW, "reviewer")])
+async def test_i2_agent_error_retries_then_parks(  # type: ignore[no-untyped-def]
+    parts, stage: Stage, role: str
+) -> None:
+    ex, _, ws, decider, runner = parts
+    runner.behaviors = _failing(role)
+    data = {"plan": "p", "checks": [], "installed": True}
+    res = await ex.run(item(stage, data=data))
+    assert res.transition.to is stage and res.transition.count_attempt
+    assert res.usage == Usage(2, 10, 1)
+    assert decider.calls == []  # no gate decision on an unfinished agent run
+    res = await ex.run(item(stage, attempt=3, data=data))
+    assert res.transition.park_reason is ParkReason.NEEDS_HUMAN
+    assert "agent did not finish: error_max_turns" in res.transition.note
+    assert res.usage == Usage(2, 10, 1)
+
+
+class DryRunAdo(FakeAdo):
+    def create_pr(self, branch: str, title: str, body: str, work_item_id: int) -> int:
+        return 0
+
+
+async def test_m6_dry_run_does_not_comment_plan(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ado = DryRunAdo(origin=origin_repo)
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", target)
+    ex = StageExecutor(target=target, ado=ado, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(target.policy.protected_paths),
+                       decisions_for=lambda _id: [])
+    wt = ws.create(5, "laya/5-add-feature")
+    (wt / "feature.txt").write_text("x")
+    ws.commit(wt, "feat: x")
+    res = await ex.run(item(Stage.PR_OPEN, data={"plan": "p", "checks": []}))
+    assert res.transition.to is Stage.AWAITING_HUMAN and res.pr_id == 0
+    assert ado.wi_comments == []
+
+
+async def test_m9_lint_fix_commit_rechecks_diff_limit(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    fixer = target.model_copy(update={"repo": target.repo.model_copy(
+        update={"commands": {"lint": "seq 1 300 > generated.txt"}})})
+    ado = FakeAdo(origin=origin_repo)
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", fixer)
+    ex = StageExecutor(target=fixer, ado=ado, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(fixer.policy.protected_paths),
+                       decisions_for=lambda _id: [])
+    res = await ex.run(item(Stage.VERIFY))
+    assert res.transition.park_reason is ParkReason.POLICY
+    assert "300" in res.transition.note and "200" in res.transition.note

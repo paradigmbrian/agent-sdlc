@@ -128,11 +128,23 @@ def after_pr_poll(status: str, outcomes: list[CommentOutcome], pr_rounds: int,
     changes = [o.comment for o in outcomes if o.intent == "change_request"]
     if not changes:
         return Transition(Stage.AWAITING_HUMAN)
-    if pr_rounds >= max_pr_rounds:
-        return park(ParkReason.PR_ROUNDS, f"Reached {max_pr_rounds} PR revision rounds.")
     feedback = "Reviewer requested changes on the pull request:\n\n" + "\n\n".join(
         f"- {c.author}: {c.content}" for c in changes)
+    if pr_rounds >= max_pr_rounds:
+        # Keep the triggering request so a human re-queue applies it (I5).
+        return Transition(Stage.PARKED, park_reason=ParkReason.PR_ROUNDS,
+                          note=f"Reached {max_pr_rounds} PR revision rounds.", feedback=feedback)
     return Transition(Stage.IMPLEMENT, feedback=feedback, count_pr_round=True)
+
+
+def after_agent_error(stage: Stage, error: str, attempt: int, max_retries: int) -> Transition:
+    """The agent session ended with an error result (max turns, execution error): retry the
+    stage, and park for a human once the retry budget is spent (I2)."""
+    if attempt >= max_retries:
+        return park(ParkReason.NEEDS_HUMAN,
+                    f"The {stage.value} agent did not finish after {attempt} retries "
+                    f"(agent did not finish: {error or 'error'}).")
+    return Transition(stage, count_attempt=True)
 
 
 def apply_transition(item: Item, t: Transition) -> Item:
@@ -141,6 +153,8 @@ def apply_transition(item: Item, t: Transition) -> Item:
         data["feedback"] = t.feedback
     if t.note:
         data["park_note" if t.to is Stage.PARKED else "note"] = t.note
+    elif t.to is Stage.PR_OPEN:
+        data.pop("note", None)  # a confident review clears a stale reviewer-concern note (M1)
     attempt = item.attempt + (1 if t.count_attempt else 0)
     pr_rounds = item.pr_rounds
     if t.count_pr_round:
@@ -167,7 +181,9 @@ def requeue(item: Item) -> Item:
         raise ValueError(f"item {item.id} is not parked")
     reason, source = item.park_reason, item.parked_from
     to = _APPROVE_NEXT.get(source, source) if reason in GATE_PARKS else source
-    data = {k: v for k, v in item.data.items() if k != "park_note"}
+    if reason is ParkReason.PR_ROUNDS:
+        to = Stage.IMPLEMENT  # apply the change request kept in data["feedback"] (I5)
+    data = {k: v for k, v in item.data.items() if k not in ("park_note", "parked_tag_set")}
     if reason is ParkReason.BUDGET:
         data["budget_offset"] = item.usage.tokens
     return replace(item, stage=to, park_reason=None, parked_from=None, attempt=0, replans=0,

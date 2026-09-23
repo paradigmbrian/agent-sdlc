@@ -89,3 +89,14 @@ def test_calibration_roundtrip(store: Store) -> None:
     cal = Calibration(temperature=1.7, threshold=0.85, mode="active", ece=0.06, n=40)
     store.set_calibration("triage", "clarity", cal)
     assert store.calibration("triage", "clarity") == cal
+
+
+# --- final review fix wave ---------------------------------------------------------------
+
+
+def test_i4_usage_cache_reads_roundtrip_and_old_dicts_load() -> None:
+    from laya_sdlc.types import Usage as U
+    u = U(1, 2, 3, cache_read_tokens=4)
+    assert U.from_dict(u.to_dict()) == u and u.tokens == 5
+    assert U.from_dict({"turns": 1, "input_tokens": 2, "output_tokens": 3}) == U(1, 2, 3, 0)
+    assert (u + u).cache_read_tokens == 8
