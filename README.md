@@ -9,11 +9,28 @@ Design: `docs/superpowers/specs/2026-09-23-laya-sdlc-design.md`
 ## One-time setup (done by a human)
 
 1. **ADO identity/PAT** with Work Items (read/write), Code (read/write), Pull Requests
-   (read/write). Store it: `security add-generic-password -s laya-sdlc-ado-pat -a $USER -w`
+   (read/write). Store it with a restricted access list:
+   `security add-generic-password -s laya-sdlc-ado-pat -a $USER -T <path to the project's .venv python> -w`
 2. **Branch policies** on `dev`, `qa`, `main`, `prod`: deny direct push for that identity;
    require a PR with you as required reviewer.
 3. **Claude token:** `claude setup-token`, then
-   `security add-generic-password -s laya-sdlc-claude-token -a $USER -w`
+   `security add-generic-password -s laya-sdlc-claude-token -a $USER -T <path to the project's .venv python> -w`
+
+   Why `-T`: without it the item's access list trusts the app that created it, so any process
+   running as you (including repo code executed by the verify commands) could read it silently.
+   `-T` names the only application trusted to read it without a prompt. Use the resolved
+   interpreter path (`uv run python -c "import os, sys; print(os.path.realpath(sys.executable))"`).
+   laya-sdlc reads secrets by running `/usr/bin/security`, so macOS may prompt the first time;
+   check the prompt names the app you expect before allowing. Alternative: export the secrets as
+   environment variables (`LAYA_SDLC_ADO_PAT`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`)
+   only in the shell that launches laya-sdlc; they are read before the keychain.
+
+   **Isolation limits.** Agent Bash runs in the Claude Agent SDK sandbox (no network, no Unix
+   sockets, no escape hatch) with a scratch `HOME` and an environment allowlist. The target's
+   verify commands (install/test/lint/typecheck/build) still execute repo code outside that
+   sandbox — only the scratch `HOME`, the environment allowlist and the absence of credential
+   variables protect you there. Full isolation (a container or VM) is a decision to make before
+   running unattended.
 4. **Pilot check:** confirm `npm run test --workspace=apps/rallysource-api` passes on `dev`
    without a database or `.env`; otherwise set `repo.env_template` or narrow the command in
    `targets/rallysource.yaml`.
