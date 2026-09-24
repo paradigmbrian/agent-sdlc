@@ -127,7 +127,20 @@ def _status(target: TargetConfig, store: Store) -> None:
         age = now - datetime.fromisoformat(tick)
         poll = int(store.get_flag("poll_s") or 60)
         warn = "  LOOP NOT RUNNING?" if age > timedelta(seconds=3 * poll) else ""
+        busy = store.get_flag("busy")
+        busy_line = ""
+        if busy:
+            # A long step blocks the loop, so an old tick is expected while it runs (I5).
+            item_id, stage, since = busy.split("|", 2)
+            busy_age = now - datetime.fromisoformat(since)
+            busy_line = f"busy: #{item_id} {stage} for {_ago(busy_age)}"
+            if busy_age > timedelta(minutes=target.limits.stale_after_minutes):
+                busy_line += "  STUCK?"
+            else:
+                warn = ""
         print(f"last tick: {_ago(age)} ago{warn}")
+        if busy_line:
+            print(busy_line)
     print(f"today: {today.turns} turns, {today.tokens:,} tokens")
     stale_after = timedelta(minutes=target.limits.stale_after_minutes)
     for i in store.items(target.name):

@@ -110,3 +110,26 @@ def test_cli_writes_log_file(db: str, tmp_path: Path, monkeypatch: pytest.Monkey
 def test_metrics_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(db, "metrics", "--days", "7") == 0
     assert "Outcomes" in capsys.readouterr().out
+
+
+def test_status_busy_suppresses_loop_warning(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    store = Store(db)
+    since = datetime.now(UTC) - timedelta(minutes=10)
+    store.set_flag("last_tick", since.isoformat())
+    store.set_flag("busy", f"9|implement|{since.isoformat()}")
+    assert run(db, "status") == 0
+    out = capsys.readouterr().out
+    assert "busy: #9 implement for 10m" in out
+    assert "LOOP NOT RUNNING?" not in out and "STUCK?" not in out
+
+
+def test_status_busy_past_stale_limit_is_stuck(
+    db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store(db)
+    since = datetime.now(UTC) - timedelta(hours=3)
+    store.set_flag("last_tick", since.isoformat())
+    store.set_flag("busy", f"9|implement|{since.isoformat()}")
+    assert run(db, "status") == 0
+    out = capsys.readouterr().out
+    assert "busy: #9 implement for 3h  STUCK?" in out and "LOOP NOT RUNNING?" in out

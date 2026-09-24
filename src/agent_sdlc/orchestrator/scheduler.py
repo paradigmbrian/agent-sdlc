@@ -179,8 +179,13 @@ class Scheduler:
 
     # one step --------------------------------------------------------------
     async def _step(self, item: Item, now: datetime) -> None:
-        with log_context(item.id, item.stage.value):
-            await self._run_step(item, now)
+        # Lets `status` tell a long step from a dead loop (I5).
+        self._store.set_flag("busy", f"{item.id}|{item.stage.value}|{now.isoformat()}")
+        try:
+            with log_context(item.id, item.stage.value):
+                await self._run_step(item, now)
+        finally:
+            self._store.set_flag("busy", None)
 
     async def _run_step(self, item: Item, now: datetime) -> None:
         retry_after = item.data.get("retry_after")

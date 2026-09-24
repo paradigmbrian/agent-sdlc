@@ -495,7 +495,7 @@ async def test_stale_item_logs_warning(env, caplog: pytest.LogCaptureFixture) ->
     assert "stale" in caplog.text
 
 
-# --- final-review fix wave: I4 kill switch keeps policy events ---
+# --- final-review fix wave: I4 kill switch keeps policy events, I5 busy flag ---
 
 
 async def test_i4_interrupted_step_records_partial_events(env) -> None:  # type: ignore[no-untyped-def]
@@ -505,3 +505,18 @@ async def test_i4_interrupted_step_records_partial_events(env) -> None:  # type:
     assert [e.kind for e in store.events_for(5)] == ["intake", "agent_session"]
     assert store.get(5).stage is Stage.TRIAGE
 
+
+async def test_i5_busy_flag_set_during_step_and_cleared_after(  # type: ignore[no-untyped-def]
+    env
+) -> None:
+    store = env[0]
+    seen: list[str | None] = []
+
+    class Spy:
+        async def run(self, item: Item) -> StepResult:
+            seen.append(store.get_flag("busy"))
+            return StepResult(Transition(Stage.PLAN))
+
+    await sched(env, Spy()).tick()
+    assert seen == [f"5|triage|{NOW.isoformat()}"]
+    assert store.get_flag("busy") is None
