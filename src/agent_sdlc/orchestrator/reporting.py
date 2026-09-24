@@ -9,11 +9,36 @@ MAX_PR_DESCRIPTION = 4000
 _TRUNCATED = "\n\n…(truncated; the full plan is in the work item comments)"
 _PREFIX = {"Bug": "fix", "Task": "chore"}
 _PARK_DETAIL_CHARS = 6000
+_AGENT_STAGES = {Stage.PLAN, Stage.IMPLEMENT, Stage.REVIEW}
 
 QUESTION_REPLY = ("Thanks — I only act on change requests automatically. If you want a code "
                   "change, reply starting with `/agent` and describe it.")
 UNCERTAIN_REPLY = ("I couldn't tell whether this asks for a code change. To request one, reply "
                    "starting with `/agent`.")
+
+
+def _denials_html(item: Item) -> str:
+    denials = item.data.get("last_denials") or []
+    if item.park_reason is not ParkReason.POLICY or item.parked_from not in _AGENT_STAGES \
+            or not denials:
+        return ""
+    rows = "".join(
+        f"<li><code>{html.escape(d['tool'])}</code> [{html.escape(d['category'])}]: "
+        f"{html.escape(d['reason'])} <code>{html.escape(d.get('input', ''))}</code></li>"
+        for d in denials)
+    return f"<p><b>Blocked tool calls</b> (most recent agent session):</p><ul>{rows}</ul>"
+
+
+def _denials_md(data: dict[str, Any]) -> str:
+    counts: dict[str, int] = data.get("denial_counts") or {}
+    if not counts:
+        return ""
+    total = sum(counts.values())
+    per_role = ", ".join(f"{r}: {n}" for r, n in sorted(counts.items()))
+    lines = [f"## Blocked tool calls\n{total} blocked ({per_role})"]
+    lines += [f"- {d['role']} `{d['tool']}` [{d['category']}]: {d['reason']}"
+              for d in (data.get("denials") or [])[:10]]
+    return "\n".join(lines)
 
 
 def pr_title(wi: WorkItem) -> str:
@@ -49,6 +74,7 @@ def pr_body(item: Item, wi: WorkItem, decisions: list[Decision], checks: list[di
         f"## Usage\n{u.turns} turns · {u.tokens:,} tokens "
         f"(+{u.cache_read_tokens:,} cache-read tokens) · verify retries {item.attempt} · "
         f"PR rounds {item.pr_rounds}",
+        _denials_md(item.data),
         "## Review notes\n" + (review_notes or "(none)"),
         "## Plan\n" + str(item.data.get("plan", "")),
     ]
@@ -67,7 +93,10 @@ def park_comment_html(item: Item) -> str:
     is_gate_park = item.park_reason in GATE_PARKS
     is_gate_stage = item.parked_from in {Stage.TRIAGE, Stage.PLAN, Stage.REVIEW}
 
-    if is_gate_park and is_gate_stage and item.parked_from is not None:
+    if item.park_reason is ParkReason.MANIFEST:
+        guidance = ("Removing the <code>agent:parked</code> tag approves these dependency "
+                    "changes; install and verify will run with them.")
+    elif is_gate_park and is_gate_stage and item.parked_from is not None:
         next_stages = {Stage.TRIAGE: "plan", Stage.PLAN: "implement", Stage.REVIEW: "pr_open"}
         next_stage = next_stages.get(item.parked_from, "unknown")
         guidance = (f"To continue, update the item if needed and remove the "
@@ -81,12 +110,15 @@ def park_comment_html(item: Item) -> str:
 
     return (f"<p><b>agent-sdlc parked this item</b> at stage <code>{stage}</code> "
             f"(reason: <code>{reason}</code>).</p><pre>{note}</pre>"
-            f"{_park_detail(item)}<p>{guidance}</p>")
+            f"{_park_detail(item)}{_denials_html(item)}<p>{guidance}</p>")
 
 
 def _park_detail(item: Item) -> str:
-    """The artifact a human must judge before approving: the plan or the review notes (I3)."""
-    if item.parked_from is Stage.PLAN:
+    """The artifact a human must judge before approving: the plan, the review notes (I3) or
+    the manifest diff (spec §5.2)."""
+    if item.park_reason is ParkReason.MANIFEST:
+        title, text = "Manifest diff", str(item.data.get("manifest_diff", ""))
+    elif item.parked_from is Stage.PLAN:
         title, text = "Plan", str(item.data.get("plan", ""))
     elif item.parked_from is Stage.REVIEW:
         title, text = "Review notes", str(item.data.get("review_notes", ""))

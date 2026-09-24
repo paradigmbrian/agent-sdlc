@@ -186,6 +186,13 @@ def requeue(item: Item) -> Item:
     data = {k: v for k, v in item.data.items() if k not in ("park_note", "parked_tag_set")}
     if reason is ParkReason.BUDGET:
         data["budget_offset"] = item.usage.tokens
+    if reason is ParkReason.MANIFEST:
+        # Approval of exactly the digest the human saw; install and verify run next (spec §5.2).
+        to = Stage.VERIFY
+        pending = data.pop("manifest_pending", None)
+        data.pop("manifest_diff", None)
+        if pending is not None:
+            data["manifest_approved"] = pending
     return replace(item, stage=to, park_reason=None, parked_from=None, attempt=0, replans=0,
                    infra_failures=0,
                    pr_rounds=0 if reason is ParkReason.PR_ROUNDS else item.pr_rounds, data=data)

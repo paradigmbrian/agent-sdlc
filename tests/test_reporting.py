@@ -16,6 +16,9 @@ ITEM = Item(5, "t", WI.title, "agent/5-x", Stage.PR_OPEN, attempt=1,
 DEC = [Decision("review", "risk", "low", {"low": 0.9}, {"low": 0.9}, 0.9, True, False)]
 CHECKS = [{"name": "test", "command": "npm test", "exit_code": 0, "output": "ok",
            "duration_s": 3.2}]
+DENIAL = {"role": "implementer", "tool": "Read", "category": "outside_worktree",
+          "reason": "path is outside the worktree",
+          "input": '{"file_path": "/Users/x/.ssh/config"}'}
 
 
 def test_pr_title_prefix_by_type() -> None:
@@ -120,3 +123,30 @@ def test_park_comment_agent_error_from_plan_says_retry() -> None:
     html = park_comment_html(item)
     assert "retry" in html and "plan" in html
     assert "approving" not in html and "proceeding" not in html
+
+
+def test_park_comment_manifest_shows_diff_and_approval_effect() -> None:
+    it = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
+              parked_from=Stage.IMPLEMENT,
+              data={"park_note": "Dependency manifests changed: package.json.",
+                    "manifest_diff": '+  "left-pad": "1.0.0"'})
+    h = park_comment_html(it)
+    assert "approves these dependency changes" in h
+    assert "left-pad" in h and "&quot;" in h  # escaped
+
+
+def test_park_comment_policy_lists_last_denials() -> None:
+    it = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.POLICY,
+              parked_from=Stage.IMPLEMENT, data={"park_note": "stopped",
+                                                 "last_denials": [DENIAL]})
+    h = park_comment_html(it)
+    assert "Blocked tool calls" in h and ".ssh/config" in h and "outside_worktree" in h
+
+
+def test_pr_body_lists_blocked_tool_calls() -> None:
+    item = replace(ITEM, data={**ITEM.data, "denial_counts": {"implementer": 2, "planner": 1},
+                               "denials": [DENIAL]})
+    body = pr_body(item, WI, DEC, CHECKS, "notes")
+    assert "## Blocked tool calls\n3 blocked (implementer: 2, planner: 1)" in body
+    assert "- implementer `Read` [outside_worktree]: path is outside the worktree" in body
+    assert "## Blocked tool calls" not in pr_body(ITEM, WI, DEC, CHECKS, "notes")

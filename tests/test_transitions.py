@@ -183,3 +183,13 @@ def test_agent_error_park_is_not_a_gate_and_requeue_retries_stage(stage: Stage) 
     parked = apply_transition(Item(1, "t", "x", "b", stage, attempt=3, data={"plan": "p"}), t)
     item = requeue(parked)
     assert item.stage is stage and item.attempt == 0
+
+
+def test_requeue_manifest_goes_to_verify_and_approves_digest() -> None:
+    it = Item(1, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
+              parked_from=Stage.IMPLEMENT, attempt=2,
+              data={"manifest_pending": "abc", "manifest_diff": "d", "park_note": "n",
+                    "parked_tag_set": True})
+    new = requeue(it)
+    assert new.stage is Stage.VERIFY and new.attempt == 0 and new.park_reason is None
+    assert new.data == {"manifest_approved": "abc"}
