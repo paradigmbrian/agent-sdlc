@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
@@ -13,6 +14,8 @@ from agent_sdlc.store import Store
 from agent_sdlc.targets import RunWindow, TargetConfig
 from agent_sdlc.types import (
     AgentInfraError,
+    AgentResult,
+    EventInput,
     Item,
     ParkReason,
     Stage,
@@ -414,3 +417,78 @@ async def test_agent_error_park_requeue_retries_stage_without_labels(  # type: i
     assert ex.seen[1].stage is Stage.PLAN  # retried the plan stage, not approved past it
     assert store.labels("plan", "plan_scope_ok") == []
     assert store.labels("plan", "plan_addresses_item") == []
+
+
+def _add_item(store: Store, stage: Stage, **kw):  # type: ignore[no-untyped-def]
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    store.save(replace(store.get(5), stage=stage, **kw))
+    return store.get(5)
+
+
+async def test_step_writes_intake_step_and_transition_events(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN),
+                                     events=[EventInput("agent_session", {"role": "x"})]))
+    await sched(env, ex).tick()
+    evs = store.events_for(5)
+    assert [e.kind for e in evs] == ["intake", "agent_session", "transition"]
+    assert evs[-1].stage == "triage" and evs[-1].payload["to"] == "plan"
+    assert store.get_flag("last_tick") == NOW.isoformat()
+
+
+async def test_awaiting_noop_poll_writes_no_events(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    _add_item(store, Stage.AWAITING_HUMAN, pr_id=1)
+    ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)),
+                          StepResult(Transition(Stage.AWAITING_HUMAN)))
+    s = sched(env, ex)
+    await s.tick()
+    await s.tick()
+    assert store.events_for(5) == []
+
+
+async def test_merge_writes_outcome(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    _add_item(store, Stage.AWAITING_HUMAN, pr_id=1)
+    await sched(env, ScriptedExecutor(StepResult(Transition(Stage.DONE)))).tick()
+    kinds = [(e.kind, e.payload.get("result")) for e in store.events_for(5)]
+    assert kinds == [("transition", None), ("outcome", "merged")]
+
+
+async def test_infra_failure_records_partial_session(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    partial = AgentResult("", Usage(1, 1, 1), role="planner")
+    await sched(env, ScriptedExecutor(AgentInfraError("sdk down", partial=partial))).tick()
+    assert [e.kind for e in store.events_for(5)] == ["intake", "agent_session", "infra_failure"]
+
+
+async def test_usage_limit_records_event(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    err = UsageLimitError("usage limit reached", partial=AgentResult("", Usage(), role="planner"))
+    await sched(env, ScriptedExecutor(err)).tick()
+    assert [e.kind for e in store.events_for(5)][-2:] == ["agent_session", "usage_limit"]
+
+
+async def test_requeue_writes_event(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, *_ = env
+    _add_item(store, Stage.PARKED, park_reason=ParkReason.RED, parked_from=Stage.VERIFY,
+              data={"parked_tag_set": True})
+    s = sched(env, ScriptedExecutor(StepResult(Transition(Stage.REVIEW))))
+    await s.tick()  # tag absent -> requeue to verify, then the step runs
+    [rq] = [e for e in store.events_for(5) if e.kind == "requeue"]
+    assert rq.payload == {"from_reason": "red", "to": "verify", "approved": False}
+
+
+async def test_park_side_effects_write_events(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    await sched(env, ScriptedExecutor(StepResult(park(ParkReason.RED, "red")))).tick()
+    assert [e.kind for e in store.events_for(5)][-2:] == ["transition", "park_tagged"]
+
+
+async def test_stale_item_logs_warning(env, caplog: pytest.LogCaptureFixture) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    it = _add_item(store, Stage.PLAN)
+    store.add_event("intake", {}, item=it, ts=NOW - timedelta(hours=3))
+    with caplog.at_level(logging.WARNING):
+        await sched(env, ScriptedExecutor(StepResult(Transition(Stage.PLAN)))).tick()
+    assert "stale" in caplog.text
