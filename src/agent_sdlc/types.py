@@ -202,6 +202,10 @@ class UsageLimitError(Exception):
 class AgentInterrupted(Exception):
     """The kill switch interrupted an agent session; the stage should be retried later."""
 
+    def __init__(self, message: str, partial: AgentResult | None = None) -> None:
+        super().__init__(message)
+        self.partial = partial
+
 
 class AgentInfraError(Exception):
     """The agent SDK/CLI failed (connection, process or missing result); retried with backoff."""

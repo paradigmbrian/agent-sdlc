@@ -386,3 +386,18 @@ async def test_stopped_note_quotes_the_escalating_denial(parts) -> None:  # type
     assert res.data["last_denials"][-1] == {
         "role": "implementer", "tool": "Read", "category": "outside_worktree",
         "reason": "path is outside the worktree", "input": '{"file_path": "/Users/x/.ssh/config"}'}
+
+
+# --- final-review fix wave: I1 escalated+is_error ---
+
+
+async def test_i1_escalated_error_result_parks_policy(parts) -> None:  # type: ignore[no-untyped-def]
+    ex, _, ws, _, runner = parts
+    ws.create(5, "agent/5-add-feature")
+    denial = Denial("Read", "outside_worktree", "path is outside the worktree", "{}")
+    runner.behaviors["implementer"] = lambda r, p, c: AgentResult(
+        "", Usage(1, 1, 1), is_error=True, error="error_during_execution",
+        escalated="outside_worktree", denials=(denial,))
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    assert res.transition.park_reason is ParkReason.POLICY
+

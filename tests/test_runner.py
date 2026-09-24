@@ -821,3 +821,42 @@ def test_i0_gitignore_check_error_fails_closed(
     reason = check_tool(IMPLEMENTER, repo, PP, CP, "Edit", {"file_path": "src/a.ts"})
     assert reason == "protected path: src/a.ts is gitignored"
 
+
+def test_i1_sdk_error_after_escalation_returns_escalated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}), sdk.ClaudeSDKError("exit 1")]
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "outside_worktree" and len(res.denials) == 1
+
+
+def test_i4_should_stop_after_escalation_returns_escalated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.AssistantMessage([sdk.TextBlock("hi")])]
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, should_stop=lambda: True)
+    res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "outside_worktree" and captured["client"].interrupted is True
+
+
+def test_i4_should_stop_without_escalation_raises_with_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Bash", {"command": "git push"}),
+               sdk.AssistantMessage([sdk.TextBlock("hi")])]
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, should_stop=lambda: True)
+    with pytest.raises(AgentInterrupted) as ei:
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+    partial = ei.value.partial
+    assert partial is not None and len(partial.denials) == 1

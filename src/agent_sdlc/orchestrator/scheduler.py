@@ -198,7 +198,10 @@ class Scheduler:
             self._store.set_flag("paused_until", until.isoformat())
             log.warning("usage limit hit; pausing until %s", until)
             return
-        except AgentInterrupted:
+        except AgentInterrupted as e:
+            # Keep the interrupted session's denials and usage; item state is unchanged (I4).
+            if events := _partial_events(e.partial):
+                self._store.save(item, events=events, at=item)
             return
         except (*_INFRA_ERRORS, AgentInfraError) as e:
             self._infra_failure(item, now, e)

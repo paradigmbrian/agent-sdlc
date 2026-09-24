@@ -14,6 +14,7 @@ from agent_sdlc.store import Store
 from agent_sdlc.targets import RunWindow, TargetConfig
 from agent_sdlc.types import (
     AgentInfraError,
+    AgentInterrupted,
     AgentResult,
     EventInput,
     Item,
@@ -492,3 +493,15 @@ async def test_stale_item_logs_warning(env, caplog: pytest.LogCaptureFixture) ->
     with caplog.at_level(logging.WARNING):
         await sched(env, ScriptedExecutor(StepResult(Transition(Stage.PLAN)))).tick()
     assert "stale" in caplog.text
+
+
+# --- final-review fix wave: I4 kill switch keeps policy events ---
+
+
+async def test_i4_interrupted_step_records_partial_events(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    err = AgentInterrupted("x", partial=AgentResult("", Usage(), role="planner"))
+    await sched(env, ScriptedExecutor(err)).tick()
+    assert [e.kind for e in store.events_for(5)] == ["intake", "agent_session"]
+    assert store.get(5).stage is Stage.TRIAGE
+

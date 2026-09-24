@@ -283,6 +283,10 @@ class ClaudeAgentRunner:
                                usage_estimated=usage is None)
 
         texts: list[str] = []
+
+        def escalated_result() -> AgentResult:
+            return replace(partial(), text=texts[-1].strip() if texts else "")
+
         result: Any = None
         reset_at: datetime | None = None
         stopping = False
@@ -295,7 +299,9 @@ class ClaudeAgentRunner:
                             writer.message(msg)
                             if self._should_stop():
                                 await client.interrupt()
-                                raise AgentInterrupted(role.name)
+                                if escalated is not None:  # keep the policy stop (I4)
+                                    return escalated_result()
+                                raise AgentInterrupted(role.name, partial=partial())
                             if isinstance(msg, AssistantMessage):
                                 texts += [b.text for b in msg.content
                                           if isinstance(b, TextBlock)]
@@ -327,20 +333,21 @@ class ClaudeAgentRunner:
         except AgentInterrupted:
             raise
         except Exception as e:
+            # A stopped session often ends in an SDK error; the policy stop wins (I1).
+            if escalated is not None:
+                return escalated_result()
             if getattr(e, "api_error_status", None) == 429 or parse_usage_limit(str(e)):
                 raise UsageLimitError(str(e), reset_at or _reset_from_text(str(e)),
                                       partial=partial()) from e
             if isinstance(e, ClaudeSDKError):
                 raise AgentInfraError(f"{role.name}: {type(e).__name__}: {e}",
                                       partial=partial()) from e
-            if escalated is not None:
-                return replace(partial(), text=texts[-1].strip() if texts else "")
             raise
         finally:
             writer.close()
         if result is None:
             if escalated is not None:
-                return replace(partial(), text=texts[-1].strip() if texts else "")
+                return escalated_result()
             raise AgentInfraError(f"{role.name}: agent session ended without a result",
                                   partial=partial())
         text = (getattr(result, "result", None) or (texts[-1] if texts else "")).strip()
