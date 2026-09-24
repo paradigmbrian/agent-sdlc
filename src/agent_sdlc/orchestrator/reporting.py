@@ -94,8 +94,9 @@ def park_comment_html(item: Item) -> str:
     is_gate_stage = item.parked_from in {Stage.TRIAGE, Stage.PLAN, Stage.REVIEW}
 
     if item.park_reason is ParkReason.MANIFEST:
+        resume = html.escape(str(item.data.get("manifest_resume", Stage.VERIFY.value)))
         guidance = ("Removing the <code>agent:parked</code> tag approves these dependency "
-                    "changes; install and verify will run with them.")
+                    f"changes; install and {resume} will run with them.")
     elif is_gate_park and is_gate_stage and item.parked_from is not None:
         next_stages = {Stage.TRIAGE: "plan", Stage.PLAN: "implement", Stage.REVIEW: "pr_open"}
         next_stage = next_stages.get(item.parked_from, "unknown")

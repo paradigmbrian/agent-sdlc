@@ -187,8 +187,9 @@ def requeue(item: Item) -> Item:
     if reason is ParkReason.BUDGET:
         data["budget_offset"] = item.usage.tokens
     if reason is ParkReason.MANIFEST:
-        # Approval of exactly the digest the human saw; install and verify run next (spec §5.2).
-        to = Stage.VERIFY
+        # Approval of exactly the digest the human saw; install and the gate's resume stage run
+        # next (spec §5.2). Older parks without manifest_resume go to verify (I2).
+        to = Stage(data.pop("manifest_resume", Stage.VERIFY.value))
         pending = data.pop("manifest_pending", None)
         data.pop("manifest_diff", None)
         if pending is not None:

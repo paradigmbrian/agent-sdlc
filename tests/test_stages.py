@@ -388,7 +388,7 @@ async def test_stopped_note_quotes_the_escalating_denial(parts) -> None:  # type
         "reason": "path is outside the worktree", "input": '{"file_path": "/Users/x/.ssh/config"}'}
 
 
-# --- final-review fix wave: I1 escalated+is_error ---
+# --- final-review fix wave: I1 escalated+is_error, I2 manifest resume stage, I3 approval diff ---
 
 
 async def test_i1_escalated_error_result_parks_policy(parts) -> None:  # type: ignore[no-untyped-def]
@@ -401,3 +401,58 @@ async def test_i1_escalated_error_result_parks_policy(parts) -> None:  # type: i
     res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
     assert res.transition.park_reason is ParkReason.POLICY
 
+
+def _with_lock_manifests(target: TargetConfig) -> TargetConfig:
+    return target.model_copy(update={"policy": target.policy.model_copy(
+        update={"manifest_paths": ["**/package.json", "**/package-lock.json"]})})
+
+
+async def test_i2_manifest_gate_records_resume_stage(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, _, ws, runner = _executor(tmp_path, _with_manifests(target), origin_repo)
+    wt = ws.create(5, "agent/5-add-feature")
+    (wt / "package.json").write_text("{}\n")
+    ws.commit(wt, "sneak")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p", "feedback": "fix it"}))
+    assert res.transition.park_reason is ParkReason.MANIFEST
+    assert res.data["manifest_resume"] == "implement"
+
+    def add_dep(r, p, cwd):  # type: ignore[no-untyped-def]
+        (cwd / "package.json").write_text('{"dependencies": {"left-pad": "1.0.0"}}\n')
+        return AgentResult("done", Usage(1, 1, 1))
+
+    runner.behaviors["implementer"] = add_dep
+    approved = {"manifest_approved": res.data["manifest_pending"]}
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p", **approved}))
+    assert res.transition.park_reason is ParkReason.MANIFEST
+    assert res.data["manifest_resume"] == "verify"
+
+
+async def test_i3_manifest_diff_shows_package_json_then_lock_stat(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, _, ws, _ = _executor(tmp_path, _with_lock_manifests(target), origin_repo)
+    wt = ws.create(5, "agent/5-add-feature")
+    (wt / "package-lock.json").write_text(
+        "".join(f'    "node_modules/pkg-{i}": {{"version": "1.0.{i}"}},\n' for i in range(2000)))
+    (wt / "package.json").write_text('{"dependencies": {"left-pad": "1.0.0"}}\n')
+    ws.commit(wt, "deps")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    diff = res.data["manifest_diff"]
+    assert diff.startswith("diff --git a/package.json b/package.json") and "left-pad" in diff
+    assert "package-lock.json" in diff and "1 file changed" in diff
+    assert "pkg-1999" not in diff
+
+
+async def test_i3_manifest_diff_is_truncated_with_marker(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, _, ws, _ = _executor(tmp_path, _with_manifests(target), origin_repo)
+    wt = ws.create(5, "agent/5-add-feature")
+    deps = ",\n".join(f'  "pkg-{i}": "1.0.{i}"' for i in range(1000))
+    (wt / "package.json").write_text(f'{{"dependencies": {{\n{deps}\n}}}}\n')
+    ws.commit(wt, "deps")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    diff = res.data["manifest_diff"]
+    assert diff.endswith("\n…(truncated)") and len(diff) == 6000 + len("\n…(truncated)")

@@ -193,3 +193,19 @@ def test_requeue_manifest_goes_to_verify_and_approves_digest() -> None:
     new = requeue(it)
     assert new.stage is Stage.VERIFY and new.attempt == 0 and new.park_reason is None
     assert new.data == {"manifest_approved": "abc"}
+
+
+def test_requeue_manifest_resumes_at_recorded_stage_keeping_feedback() -> None:
+    it = Item(1, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
+              parked_from=Stage.IMPLEMENT,
+              data={"manifest_pending": "abc", "manifest_diff": "d", "park_note": "n",
+                    "manifest_resume": "implement", "feedback": "apply the change request"})
+    new = requeue(it)
+    assert new.stage is Stage.IMPLEMENT
+    assert new.data == {"manifest_approved": "abc", "feedback": "apply the change request"}
+
+
+def test_requeue_manifest_without_resume_defaults_to_verify() -> None:
+    it = Item(1, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
+              parked_from=Stage.PR_OPEN, data={"manifest_pending": "abc"})
+    assert requeue(it).stage is Stage.VERIFY

@@ -166,3 +166,12 @@ def test_tracked_files_and_diff_paths(ws: Workspaces) -> None:
     ws.commit(wt, "ab")
     d = ws.diff(wt, paths=["a.txt"])
     assert "a.txt" in d and "b.txt" not in d
+
+
+def test_diff_stat_for_paths(ws: Workspaces) -> None:
+    wt = ws.create(1, "agent/1-a")
+    (wt / "a.txt").write_text("a\n")
+    (wt / "b.txt").write_text("b\n")
+    ws.commit(wt, "ab")
+    d = ws.diff(wt, paths=["a.txt"], stat=True)
+    assert "a.txt" in d and "1 file changed" in d and "b.txt" not in d

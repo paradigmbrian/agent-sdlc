@@ -58,6 +58,7 @@ log = logging.getLogger(__name__)
 _KEPT_DENIALS = 10     # denials kept on the item for the PR body
 _PARK_DENIALS = 5      # denials quoted in a park note/comment
 _MANIFEST_DIFF_CHARS = 6000
+_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
 
 
 @dataclass
@@ -193,8 +194,9 @@ class StageExecutor:
                 f"{when}: the diff is {lines} lines, over the {limit}-line limit."))
         return None
 
-    def _manifest_gate(self, item: Item, wt: Path) -> StepResult | None:
-        """Park when the branch changes a manifest in a way no human has approved (§5.2)."""
+    def _manifest_gate(self, item: Item, wt: Path, resume: Stage) -> StepResult | None:
+        """Park when the branch changes a manifest in a way no human has approved (§5.2).
+        `resume` is where an approving requeue goes next."""
         files = self._mp.violations(self._ws.changed_files(wt))
         if not files:
             return None
@@ -202,12 +204,20 @@ class StageExecutor:
         if digest == item.data.get("manifest_approved"):
             return None
         log.warning("unapproved manifest change: %s", ", ".join(files))
-        diff = self._ws.diff(wt, paths=files)[:_MANIFEST_DIFF_CHARS]
+        # Full hunks for manifests, only a stat for lockfiles, so a large lockfile change cannot
+        # push the package.json change out of the approval diff (I3).
+        locks = [f for f in files if f.endswith(_LOCKFILES)]
+        manifests = [f for f in files if f not in locks]
+        diff = (self._ws.diff(wt, paths=manifests) if manifests else "") + (
+            self._ws.diff(wt, paths=locks, stat=True) if locks else "")
+        if len(diff) > _MANIFEST_DIFF_CHARS:
+            diff = diff[:_MANIFEST_DIFF_CHARS] + "\n…(truncated)"
         return StepResult(
             park(ParkReason.MANIFEST,
                  f"Dependency manifests changed: {', '.join(files)}. A human must approve "
-                 f"them before install and verify run."),
-            data={"manifest_pending": digest, "manifest_diff": diff})
+                 f"them before install and {resume.value} run."),
+            data={"manifest_pending": digest, "manifest_diff": diff,
+                  "manifest_resume": resume.value})
 
     def _ensure_installed(self, item: Item, wt: Path
                           ) -> tuple[StepResult | None, dict[str, Any], list[EventInput]]:
@@ -247,7 +257,8 @@ class StageExecutor:
         wi = self._ado.get_work_item(item.id)
         wt = self._ws.create(item.id, item.branch)
         self._ws.reset(wt)
-        if gate := self._manifest_gate(item, wt):
+        # Resume at implement: pending feedback (e.g. a PR change request) must still apply (I2).
+        if gate := self._manifest_gate(item, wt, Stage.IMPLEMENT):
             return gate
         failed_install, inst_data, events = self._ensure_installed(item, wt)
         if failed_install:
@@ -266,7 +277,7 @@ class StageExecutor:
         files = self._ws.changed_files(wt)
         t = after_implement(self._pp.violations(files), bool(files), self._ws.diff_lines(wt),
                             self._t.policy.max_diff_lines)
-        if t.to is Stage.VERIFY and (gate := self._manifest_gate(item, wt)):
+        if t.to is Stage.VERIFY and (gate := self._manifest_gate(item, wt, Stage.VERIFY)):
             return replace(gate, usage=res.usage, events=events,
                            data={"feedback": None, **data, **gate.data})
         return StepResult(t, res.usage, data={"feedback": None, **data}, events=events)
@@ -275,7 +286,7 @@ class StageExecutor:
         wt = self._ws.create(item.id, item.branch)
         if policy := self._policy_park(wt, "Verify"):
             return policy
-        if gate := self._manifest_gate(item, wt):
+        if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
         failed_install, inst_data, events = self._ensure_installed(item, wt)
         if failed_install:
@@ -292,7 +303,7 @@ class StageExecutor:
                     ParkReason.POLICY,
                     "Lint fixes touched protected paths: " + ", ".join(violations)),
                     events=events, data=inst_data)
-            if gate := self._manifest_gate(item, wt):
+            if gate := self._manifest_gate(item, wt, Stage.VERIFY):
                 return replace(gate, events=events, data={**inst_data, **gate.data})
             lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
             if lines > limit:  # M9
@@ -327,7 +338,7 @@ class StageExecutor:
         wt = self._ws.create(item.id, item.branch)
         if policy := self._policy_park(wt, "Pre-push check"):
             return policy
-        if gate := self._manifest_gate(item, wt):
+        if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
         self._ado.push_branch(wt, item.branch)
         body = pr_body(item, wi, self._decisions_for(item.id), item.data.get("checks", []),

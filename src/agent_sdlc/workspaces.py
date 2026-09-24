@@ -216,9 +216,11 @@ class Workspaces:
             )
         return total
 
-    def diff(self, wt: Path, max_chars: int = 60000, paths: list[str] | None = None) -> str:
+    def diff(self, wt: Path, max_chars: int = 60000, paths: list[str] | None = None,
+             stat: bool = False) -> str:
         extra = ["--", *paths] if paths else []
-        return self._git("diff", self._range(), *extra, cwd=wt)[:max_chars]
+        flags = ["--stat"] if stat else []
+        return self._git("diff", *flags, self._range(), *extra, cwd=wt)[:max_chars]
 
     def blob_digest(self, wt: Path, paths: list[str]) -> str:
         """sha256 over (path, blob at HEAD) for `paths`; a path absent at HEAD counts as

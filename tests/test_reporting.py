@@ -150,3 +150,12 @@ def test_pr_body_lists_blocked_tool_calls() -> None:
     assert "## Blocked tool calls\n3 blocked (implementer: 2, planner: 1)" in body
     assert "- implementer `Read` [outside_worktree]: path is outside the worktree" in body
     assert "## Blocked tool calls" not in pr_body(ITEM, WI, DEC, CHECKS, "notes")
+
+
+def test_park_comment_manifest_names_resume_stage() -> None:
+    it = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
+              parked_from=Stage.IMPLEMENT,
+              data={"park_note": "n", "manifest_diff": "d", "manifest_resume": "implement"})
+    assert "install and implement will run with them" in park_comment_html(it)
+    it = replace(it, data={"park_note": "n", "manifest_diff": "d"})
+    assert "install and verify will run with them" in park_comment_html(it)
