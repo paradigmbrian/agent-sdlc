@@ -51,11 +51,41 @@ uv run agent-sdlc run --once --dry-run-push   # full pipeline, no push, prints P
 uv run agent-sdlc run                         # loop (polls every 60s)
 uv run agent-sdlc pause | resume              # kill switch
 uv run agent-sdlc requeue <id>                # same as removing the agent:parked tag
+uv run agent-sdlc trace <id> [--full]          # timeline: transitions, sessions, denials, checks
+uv run agent-sdlc metrics [--days 30]          # outcomes, parks, effort, latency, denials, gates
 ```
 
 Opt a work item in by adding the `agent` tag. Parked items get a comment and the `agent:parked`
 tag; removing the tag approves proceeding past a gate park or retries a failed stage. On a PR,
 start a comment with `/agent` to request a revision.
+
+`status` also shows when the loop last ticked (`LOOP NOT RUNNING?` after 3 missed polls) and
+marks items with no event for `limits.stale_after_minutes` as `STALE`.
+
+### Traces and logs
+
+- `~/.agent-sdlc/traces/<id>/` holds one JSONL transcript per agent session (every tool call,
+  result and blocked call) and the full output of every install/verify command. Files are
+  `0600`. Override with `--traces` or `AGENT_SDLC_TRACES`.
+- `~/.agent-sdlc/logs/agent-sdlc.log` is the rotating log (14 days), each line tagged
+  `[#<id> <stage>]`. Override with `--logs` or `AGENT_SDLC_LOGS`.
+
+### Parks you will see from the guardrails
+
+- `policy` with "stopped after blocked tool calls": an agent tried to read outside its worktree
+  or write a protected path, or hit `limits.max_denials_per_session` blocked calls. The comment
+  quotes the attempts.
+- `manifest`: the change edits `package.json` or a lockfile. Review the diff in the comment;
+  removing the tag approves exactly that change, and install and verify run with it. A later
+  different change parks again.
+- `budget` mid-session: the agent was stopped when the item's token budget ran out.
+
+Tooling config that verify executes (eslint/vite/postcss/tailwind config, `turbo.json`,
+`.npmrc`, `nest-cli.json`, `packages/eslint-config/**`, tsconfig files) is protected.
+Agent-written source and test code still runs on the host during verify. Container isolation is
+a separate follow-up and must be in place before unattended runs.
+
+To label decisions from abandoned PRs first: `uv run agent-sdlc label review --abandoned`.
 
 ## Calibrating Laya gates
 
