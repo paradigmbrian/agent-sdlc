@@ -170,3 +170,16 @@ def test_c1_requeue_drops_parked_tag_set() -> None:
     parked = apply_transition(ITEM, park(ParkReason.NEEDS_HUMAN, "unclear"))
     parked = replace(parked, data={**parked.data, "parked_tag_set": True})
     assert "parked_tag_set" not in requeue(parked).data
+
+
+@pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPLEMENT, Stage.REVIEW])
+def test_agent_error_park_is_not_a_gate_and_requeue_retries_stage(stage: Stage) -> None:
+    from laya_sdlc.orchestrator.transitions import after_agent_error
+    from laya_sdlc.types import GATE_PARKS
+
+    t = after_agent_error(stage, "error_max_turns", 3, 3)
+    assert t.park_reason is ParkReason.AGENT_ERROR
+    assert ParkReason.AGENT_ERROR not in GATE_PARKS
+    parked = apply_transition(Item(1, "t", "x", "b", stage, attempt=3, data={"plan": "p"}), t)
+    item = requeue(parked)
+    assert item.stage is stage and item.attempt == 0

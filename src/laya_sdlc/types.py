@@ -33,6 +33,7 @@ class ParkReason(StrEnum):
     PR_ROUNDS = "pr_rounds"
     BUDGET = "budget"
     INFRA = "infra"
+    AGENT_ERROR = "agent_error"  # an agent session failed; not a gate park, requeue retries
 
 
 # Parks caused by a Laya gate; a human re-queue means "approved, proceed past the gate".

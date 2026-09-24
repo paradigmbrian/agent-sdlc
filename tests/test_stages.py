@@ -153,7 +153,7 @@ async def test_i2_agent_error_retries_then_parks(  # type: ignore[no-untyped-def
     assert res.usage == Usage(2, 10, 1)
     assert decider.calls == []  # no gate decision on an unfinished agent run
     res = await ex.run(item(stage, attempt=3, data=data))
-    assert res.transition.park_reason is ParkReason.NEEDS_HUMAN
+    assert res.transition.park_reason is ParkReason.AGENT_ERROR
     assert "agent did not finish: error_max_turns" in res.transition.note
     assert res.usage == Usage(2, 10, 1)
 

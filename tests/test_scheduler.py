@@ -391,3 +391,26 @@ async def test_i4_cache_reads_do_not_trip_item_budget(env) -> None:  # type: ign
                     clock=lambda: NOW).tick()
     item = store.get(5)
     assert item.stage is Stage.PLAN and item.usage.cache_read_tokens == 1_000_000
+
+
+async def test_agent_error_park_requeue_retries_stage_without_labels(  # type: ignore[no-untyped-def]
+    env,
+) -> None:
+    from tests.fakes import decision
+
+    store, ado, _, _ = env
+    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.save(replace(store.get(5), stage=Stage.PLAN))
+    rejected = decision("plan", "plan_scope_ok", "no")
+    ex = ScriptedExecutor(
+        StepResult(park(ParkReason.AGENT_ERROR, "agent did not finish"),
+                   decisions=[(rejected, {"plan": "old"})]),
+        StepResult(Transition(Stage.IMPLEMENT)))
+    s = sched(env, ex)
+    await s.tick()
+    assert store.get(5).park_reason is ParkReason.AGENT_ERROR
+    ado.set_tag(5, "laya:parked", False)
+    await s.tick()
+    assert ex.seen[1].stage is Stage.PLAN  # retried the plan stage, not approved past it
+    assert store.labels("plan", "plan_scope_ok") == []
+    assert store.labels("plan", "plan_addresses_item") == []

@@ -141,7 +141,7 @@ def after_agent_error(stage: Stage, error: str, attempt: int, max_retries: int) 
     """The agent session ended with an error result (max turns, execution error): retry the
     stage, and park for a human once the retry budget is spent (I2)."""
     if attempt >= max_retries:
-        return park(ParkReason.NEEDS_HUMAN,
+        return park(ParkReason.AGENT_ERROR,
                     f"The {stage.value} agent did not finish after {attempt} retries "
                     f"(agent did not finish: {error or 'error'}).")
     return Transition(stage, count_attempt=True)

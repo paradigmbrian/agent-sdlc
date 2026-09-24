@@ -112,3 +112,11 @@ def test_i5_pr_rounds_park_comment_says_implement() -> None:
     item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.PR_ROUNDS,
                 parked_from=Stage.AWAITING_HUMAN, data={"park_note": "rounds"})
     assert "<code>implement</code>" in park_comment_html(item)
+
+
+def test_park_comment_agent_error_from_plan_says_retry() -> None:
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.AGENT_ERROR,
+                parked_from=Stage.PLAN, data={"park_note": "agent did not finish"})
+    html = park_comment_html(item)
+    assert "retry" in html and "plan" in html
+    assert "approving" not in html and "proceeding" not in html
