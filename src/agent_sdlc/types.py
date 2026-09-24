@@ -34,6 +34,7 @@ class ParkReason(StrEnum):
     BUDGET = "budget"
     INFRA = "infra"
     AGENT_ERROR = "agent_error"  # an agent session failed; not a gate park, requeue retries
+    MANIFEST = "manifest"  # dependency manifests changed; a human approves them before install
 
 
 # Parks caused by a Laya gate; a human re-queue means "approved, proceed past the gate".
@@ -110,6 +111,7 @@ class CommandResult:
     exit_code: int
     output: str
     duration_s: float
+    log: str | None = None         # full output file, when one was written
 
     @property
     def ok(self) -> bool:
@@ -146,23 +148,55 @@ class Item:
     usage: Usage = Usage()
 
 
+# Denial categories that stop an agent session immediately (spec §5.3).
+ESCALATE_CATEGORIES = frozenset({"outside_worktree", "protected_path"})
+
+
+@dataclass(frozen=True)
+class Denial:
+    tool: str
+    category: str   # tool_not_permitted | protected_path | outside_worktree |
+                    # command_not_allowlisted | shell_syntax | side_effect_flag | policy_error
+    reason: str
+    input: str = ""  # compact JSON of the tool input, at most 500 chars
+
+
+@dataclass(frozen=True)
+class EventInput:
+    kind: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class AgentResult:
     text: str
     usage: Usage
-    denied: tuple[str, ...] = ()
+    denials: tuple[Denial, ...] = ()
     is_error: bool = False
     error: str = ""                # result subtype when is_error (e.g. "error_max_turns")
+    escalated: str | None = None   # a denial category, "denial_threshold" or "budget"
+    session_id: str = ""
+    duration_ms: int = 0
+    cost_usd: float | None = None
+    trace: str | None = None       # JSONL transcript path
+    trace_error: str | None = None
+    role: str = ""
+    usage_estimated: bool = False  # no ResultMessage: usage summed from assistant messages
+
+    @property
+    def denied(self) -> tuple[str, ...]:
+        return tuple(f"{d.tool}: {d.reason}" for d in self.denials)
 
 
 class UsageLimitError(Exception):
     """The model provider refused work because a usage/rate limit window is exhausted."""
 
     def __init__(self, message: str, reset_at: datetime | None = None,
-                 usage: Usage | None = None) -> None:
+                 usage: Usage | None = None, partial: AgentResult | None = None) -> None:
         super().__init__(message)
         self.reset_at = reset_at
         self.usage = usage or Usage()  # spent before the limit hit; still counts
+        self.partial = partial         # what the session did before it failed, for events
 
 
 class AgentInterrupted(Exception):
@@ -171,3 +205,7 @@ class AgentInterrupted(Exception):
 
 class AgentInfraError(Exception):
     """The agent SDK/CLI failed (connection, process or missing result); retried with backoff."""
+
+    def __init__(self, message: str, partial: AgentResult | None = None) -> None:
+        super().__init__(message)
+        self.partial = partial

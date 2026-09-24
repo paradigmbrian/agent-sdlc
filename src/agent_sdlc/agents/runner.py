@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -9,8 +10,15 @@ from pathlib import Path
 from typing import Any, cast
 
 from agent_sdlc.agents.roles import Role
-from agent_sdlc.policy import CommandPolicy, PathPolicy
-from agent_sdlc.types import AgentInfraError, AgentInterrupted, AgentResult, Usage, UsageLimitError
+from agent_sdlc.policy import CommandPolicy, PathPolicy, categorize
+from agent_sdlc.types import (
+    AgentInfraError,
+    AgentInterrupted,
+    AgentResult,
+    Denial,
+    Usage,
+    UsageLimitError,
+)
 
 _WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # Narrow on purpose (I2): only the provider's own usage/rate-limit wording or an HTTP 429 status,
@@ -53,6 +61,23 @@ def check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: C
         return _check_tool(role, cwd, path_policy, command_policy, tool_name, tool_input)
     except Exception as e:
         return f"policy check failed: {type(e).__name__}: {e}"
+
+
+def _compact(obj: Any, limit: int = 500) -> str:
+    try:
+        text = json.dumps(obj, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(obj)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def evaluate_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: CommandPolicy,
+                  tool_name: str, tool_input: dict[str, Any]) -> Denial | None:
+    """check_tool, returned as a categorized Denial (spec §5.3)."""
+    reason = check_tool(role, cwd, path_policy, command_policy, tool_name, tool_input)
+    if reason is None:
+        return None
+    return Denial(tool_name, categorize(reason), reason, _compact(tool_input))
 
 
 def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: CommandPolicy,
@@ -154,21 +179,22 @@ class ClaudeAgentRunner:
 
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._home.mkdir(parents=True, exist_ok=True)
-        denied: list[str] = []
+        denials: list[Denial] = []
 
         async def pre_tool_use(input_data: HookInput, tool_use_id: str | None,
                                context: HookContext) -> SyncHookJSONOutput:
             # input_data is a TypedDict union; only PreToolUse events reach this matcher, and
             # PreToolUseHookInput carries tool_name/tool_input, so a plain dict view is safe here.
             data = cast(dict[str, Any], input_data)
-            reason = check_tool(role, cwd, self._pp, self._cp, data.get("tool_name", ""),
-                                data.get("tool_input") or {})
-            if reason is None:
+            tool = str(data.get("tool_name", ""))
+            denial = evaluate_tool(role, cwd, self._pp, self._cp, tool,
+                                   data.get("tool_input") or {})
+            if denial is None:
                 return {}
-            denied.append(f"{data.get('tool_name')}: {reason}")
+            denials.append(denial)
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                "permissionDecisionReason": f"Blocked by agent-sdlc policy: {reason}"}}
+                "permissionDecisionReason": f"Blocked by agent-sdlc policy: {denial.reason}"}}
 
         options = ClaudeAgentOptions(
             system_prompt=role.system_prompt,
@@ -224,4 +250,4 @@ class ClaudeAgentRunner:
                                 or parse_usage_limit(text)):
             raise UsageLimitError(text, reset_at or _reset_from_text(text), usage)
         error = str(getattr(result, "subtype", "") or "error") if result.is_error else ""
-        return AgentResult(text, usage, tuple(denied), bool(result.is_error), error)
+        return AgentResult(text, usage, tuple(denials), bool(result.is_error), error)

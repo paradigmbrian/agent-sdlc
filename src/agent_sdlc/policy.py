@@ -8,6 +8,24 @@ from pathlib import Path
 _OUTSIDE = "path is outside the worktree"
 
 
+def categorize(reason: str) -> str:
+    """Map a denial reason produced by this module or the runner to its category."""
+    r = reason.lower()
+    if r.startswith("tool ") and "is not permitted" in r:
+        return "tool_not_permitted"
+    if r.startswith("protected path"):
+        return "protected_path"
+    if r.startswith(_OUTSIDE):
+        return "outside_worktree"
+    if r.startswith("command not allowlisted") or r == "empty command":
+        return "command_not_allowlisted"
+    if r.startswith(("shell operators", "command could not be parsed")):
+        return "shell_syntax"
+    if r.startswith(("find with", "rg --pre", "tree -o", "git --output")):
+        return "side_effect_flag"
+    return "policy_error"
+
+
 def _glob_to_regex(pattern: str) -> re.Pattern[str]:
     """Root-anchored glob: `**/` = zero or more dirs, `**` = anything, `*`/`?` stay in a segment."""
     out: list[str] = []

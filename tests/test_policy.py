@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_sdlc.policy import CommandPolicy, PathPolicy
+from agent_sdlc.policy import CommandPolicy, PathPolicy, categorize
 
 PROTECTED = [
     "**/prisma/migrations/**", "infra/**", "azure-pipelines*.yml", "Dockerfile*",
@@ -125,3 +125,22 @@ def test_exact_target_command_with_operators_is_allowed() -> None:
                                   "INFRA/x", "Infra/main.bicep", ".GIT/config", "certs/k.PEM"])
 def test_m2_protected_matching_is_case_insensitive(path: str) -> None:
     assert PathPolicy(PROTECTED).is_protected(path)
+
+
+@pytest.mark.parametrize("reason,category", [
+    ("tool Write is not permitted for planner", "tool_not_permitted"),
+    ("protected path: infra/x.bicep", "protected_path"),
+    ("path is outside the worktree", "outside_worktree"),
+    ("path is outside the worktree: /etc/hosts", "outside_worktree"),
+    ("command not allowlisted: git", "command_not_allowlisted"),
+    ("empty command", "command_not_allowlisted"),
+    ("shell operators, substitutions and redirects are not allowed", "shell_syntax"),
+    ("command could not be parsed", "shell_syntax"),
+    ("find with side-effect actions is not allowed", "side_effect_flag"),
+    ("rg --pre/--pre-glob is not allowed", "side_effect_flag"),
+    ("tree -o/-R/--fromfile is not allowed", "side_effect_flag"),
+    ("git --output is not allowed", "side_effect_flag"),
+    ("policy check failed: ValueError: embedded null byte", "policy_error"),
+])
+def test_categorize(reason: str, category: str) -> None:
+    assert categorize(reason) == category

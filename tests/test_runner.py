@@ -13,12 +13,20 @@ from agent_sdlc.agents.roles import (
     implementer_prompt,
     reviewer_prompt,
 )
-from agent_sdlc.agents.runner import ClaudeAgentRunner, agent_env, check_tool, parse_usage_limit
+from agent_sdlc.agents.runner import (
+    ClaudeAgentRunner,
+    agent_env,
+    check_tool,
+    evaluate_tool,
+    parse_usage_limit,
+)
 from agent_sdlc.policy import CommandPolicy, PathPolicy
 from agent_sdlc.types import (
     AgentInfraError,
     AgentInterrupted,
+    AgentResult,
     CommandResult,
+    Denial,
     Usage,
     UsageLimitError,
     WorkItem,
@@ -547,3 +555,22 @@ def test_i2_result_error_with_429_status_is_usage_limit(
 @pytest.mark.parametrize("text", ["rate limit", "limit reached", "Rate limiting bug in foo"])
 def test_i2_parse_usage_limit_is_narrow(text: str) -> None:
     assert parse_usage_limit(text) is False
+
+
+def test_evaluate_tool_returns_categorized_denial(tmp_path: Path) -> None:
+    d = evaluate_tool(IMPLEMENTER, tmp_path, PP, CP, "Read", {"file_path": "/etc/hosts"})
+    assert d == Denial("Read", "outside_worktree", "path is outside the worktree",
+                       '{"file_path": "/etc/hosts"}')
+    assert evaluate_tool(IMPLEMENTER, tmp_path, PP, CP, "Write", {"file_path": "src/a.ts"}) is None
+
+
+def test_evaluate_tool_truncates_input(tmp_path: Path) -> None:
+    d = evaluate_tool(IMPLEMENTER, tmp_path, PP, CP, "Bash", {"command": "curl " + "x" * 2000})
+    assert d is not None and d.category == "command_not_allowlisted"
+    assert len(d.input) == 500 and d.input.endswith("…")
+
+
+def test_agent_result_denied_is_derived_from_denials() -> None:
+    r = AgentResult("t", Usage(), (Denial("Read", "outside_worktree",
+                                          "path is outside the worktree"),))
+    assert r.denied == ("Read: path is outside the worktree",)
