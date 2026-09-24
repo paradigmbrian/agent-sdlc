@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "claude-agent-sdk>=0.2.158",
     "httpx>=0.28.1",
+    "keyring>=25.7.0",
     "laya>=0.3.11",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",

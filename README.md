@@ -10,20 +10,27 @@ Design: `docs/superpowers/specs/2026-09-23-laya-sdlc-design.md`
 
 1. **ADO identity/PAT** with Work Items (read/write), Code (read/write), Pull Requests
    (read/write). Store it with a restricted access list:
-   `security add-generic-password -s laya-sdlc-ado-pat -a $USER -T <path to the project's .venv python> -w`
+   `security add-generic-password -s laya-sdlc-ado-pat -a $USER -T <resolved interpreter path, see below> -w`
 2. **Branch policies** on `dev`, `qa`, `main`, `prod`: deny direct push for that identity;
    require a PR with you as required reviewer.
 3. **Claude token:** `claude setup-token`, then
-   `security add-generic-password -s laya-sdlc-claude-token -a $USER -T <path to the project's .venv python> -w`
+   `security add-generic-password -s laya-sdlc-claude-token -a $USER -T <resolved interpreter path, see below> -w`
 
-   Why `-T`: without it the item's access list trusts the app that created it, so any process
-   running as you (including repo code executed by the verify commands) could read it silently.
-   `-T` names the only application trusted to read it without a prompt. Use the resolved
-   interpreter path (`uv run python -c "import os, sys; print(os.path.realpath(sys.executable))"`).
-   laya-sdlc reads secrets by running `/usr/bin/security`, so macOS may prompt the first time;
-   check the prompt names the app you expect before allowing. Alternative: export the secrets as
-   environment variables (`LAYA_SDLC_ADO_PAT`, `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`)
-   only in the shell that launches laya-sdlc; they are read before the keychain.
+   Why `-T`: without it the item's access list trusts whichever app created it (`security`),
+   so any process running as you could read it with `security find-generic-password` and no
+   prompt. laya-sdlc reads secrets in-process through `keyring`, so the keychain checks the
+   Python interpreter itself; `-T <interpreter>` makes that interpreter the only app that reads
+   the item without a prompt, and `security` (or anything else) gets a prompt instead. Use the
+   resolved interpreter path, not the `.venv` symlink:
+   `uv run python -c "import os, sys; print(os.path.realpath(sys.executable))"`.
+   If you recreate the venv with a different Python, re-add the items with the new path.
+
+   **What this does not protect against:** any code running as you can still launch that same
+   interpreter and read the item, and a prompt that says "python" won't tell you who is asking.
+   So never click "Always Allow" on a prompt you didn't expect. Alternative: export the secrets
+   as environment variables (`LAYA_SDLC_ADO_PAT`, `CLAUDE_CODE_OAUTH_TOKEN` or
+   `ANTHROPIC_API_KEY`) only in the shell that launches laya-sdlc; they are read before the
+   keychain and never passed to agents or verify commands.
 
    **Isolation limits.** Agent Bash runs in the Claude Agent SDK sandbox (no network, no Unix
    sockets, no escape hatch) with a scratch `HOME` and an environment allowlist. The target's

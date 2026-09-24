@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import base64
+import getpass
 import os
-import subprocess
+
+import keyring
+from keyring.errors import KeyringError
 
 ADO_PAT = ("laya-sdlc-ado-pat", "LAYA_SDLC_ADO_PAT")
 CLAUDE_TOKEN = ("laya-sdlc-claude-token", "CLAUDE_CODE_OAUTH_TOKEN")
@@ -14,13 +17,20 @@ class SecretNotFound(Exception):
 
 
 def get_secret(service: str, env_var: str) -> str:
-    """Env var first, then the macOS keychain (`security add-generic-password -s <service>`)."""
+    """Env var first, then the macOS keychain item `<service>` for account `$USER`.
+
+    The keychain is read in-process (keyring → Security framework), so the item's access list
+    is checked against this Python interpreter rather than /usr/bin/security.
+    """
     if value := os.environ.get(env_var):
         return value
-    r = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
-                       capture_output=True, text=True, check=False)
-    if r.returncode == 0 and r.stdout.strip():
-        return r.stdout.strip()
+    try:
+        stored = keyring.get_password(service, getpass.getuser())
+    except KeyringError as e:
+        raise SecretNotFound(f"set {env_var}, or allow access to keychain item "
+                             f"'{service}': {e}") from e
+    if stored and stored.strip():
+        return stored.strip()
     raise SecretNotFound(f"set {env_var} or add keychain item '{service}'")
 
 
