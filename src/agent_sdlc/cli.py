@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
 import os
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from agent_sdlc.decisions.gates import GATES
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
+from agent_sdlc.logctx import configure_logging
 from agent_sdlc.orchestrator.transitions import requeue
 from agent_sdlc.store import Store
 from agent_sdlc.targets import TargetConfig, load_target
+from agent_sdlc.tracing import render_trace
+from agent_sdlc.types import ACTIVE_STAGES, EventInput
 
-_DEFAULT_DB = f"sqlite:///{Path('~/.agent-sdlc/state.db').expanduser()}"
+_STATE = Path("~/.agent-sdlc").expanduser()
+_DEFAULT_DB = f"sqlite:///{_STATE / 'state.db'}"
 # Defaults resolve from the project root, not the CWD (M12).
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +28,9 @@ def _parser() -> argparse.ArgumentParser:
         "AGENT_SDLC_TARGET", str(_ROOT / "targets" / "rallysource.yaml")))
     p.add_argument("--db", default=os.environ.get("AGENT_SDLC_DB", _DEFAULT_DB))
     p.add_argument("--workspaces", default=str(_ROOT / "workspaces"))
+    p.add_argument("--traces", default=os.environ.get("AGENT_SDLC_TRACES",
+                                                      str(_STATE / "traces")))
+    p.add_argument("--logs", default=os.environ.get("AGENT_SDLC_LOGS", str(_STATE / "logs")))
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
@@ -36,6 +42,9 @@ def _parser() -> argparse.ArgumentParser:
     rq = sub.add_parser("requeue")
     rq.add_argument("item_id", type=int)
     rq.add_argument("--local", action="store_true", help="do not touch ADO tags")
+    tr = sub.add_parser("trace")
+    tr.add_argument("item_id", type=int)
+    tr.add_argument("--full", action="store_true", help="also print each session's tool calls")
     lab = sub.add_parser("label")
     lab.add_argument("gate", choices=sorted(GATES))
     lab.add_argument("--limit", type=int, default=20)
@@ -51,8 +60,8 @@ def _store(url: str) -> Store:
     return Store(url)
 
 
-def _runtime(target: TargetConfig, store: Store, workspaces: Path,
-             dry_run_push: bool) -> tuple[Any, Any, Any]:
+def _runtime(target: TargetConfig, store: Store, workspaces: Path, dry_run_push: bool,
+             traces: Path | None = None) -> tuple[Any, Any, Any]:
     from agent_sdlc.adapters.ado import AdoClient
     from agent_sdlc.agents.runner import ClaudeAgentRunner
     from agent_sdlc.decisions.decider import Decider, LayaPredictor
@@ -78,47 +87,88 @@ def _runtime(target: TargetConfig, store: Store, workspaces: Path,
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([target.repo.install, *target.repo.commands.values()])
     runner = ClaudeAgentRunner(pp, cp, Path("~/.agent-sdlc/claude-config").expanduser(), auth_env,
-                               should_stop=lambda: store.get_flag("paused") == "1", home=ws.home)
+                               should_stop=lambda: store.get_flag("paused") == "1", home=ws.home,
+                               max_denials=target.limits.max_denials_per_session)
     decider = Decider(LayaPredictor(target.laya.model), store.calibration,
                       target.laya.default_threshold)
     executor = StageExecutor(target=target, ado=ado, decider=decider, runner=runner,
-                             workspaces=ws, path_policy=pp, decisions_for=store.decisions_for)
+                             workspaces=ws, path_policy=pp, decisions_for=store.decisions_for,
+                             traces=traces)
     scheduler = Scheduler(target=target, store=store, executor=executor, ado=ado, workspaces=ws)
     return scheduler, ado, decider
 
 
+def _ago(delta: timedelta) -> str:
+    s = max(int(delta.total_seconds()), 0)
+    if s < 90:
+        return f"{s}s"
+    if s < 90 * 60:
+        return f"{s // 60}m"
+    if s < 48 * 3600:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
+
+
 def _status(target: TargetConfig, store: Store) -> None:
+    now = datetime.now(UTC)
     paused = "yes" if store.get_flag("paused") == "1" else "no"
     until = store.get_flag("paused_until") or "-"
     today = store.daily_usage(datetime.now().astimezone().date())
     print(f"target: {target.name}  paused: {paused}  paused_until: {until}")
+    tick = store.get_flag("last_tick")
+    if tick is None:
+        print("last tick: never  LOOP NOT RUNNING?")
+    else:
+        age = now - datetime.fromisoformat(tick)
+        poll = int(store.get_flag("poll_s") or 60)
+        warn = "  LOOP NOT RUNNING?" if age > timedelta(seconds=3 * poll) else ""
+        print(f"last tick: {_ago(age)} ago{warn}")
     print(f"today: {today.turns} turns, {today.tokens:,} tokens")
+    stale_after = timedelta(minutes=target.limits.stale_after_minutes)
     for i in store.items(target.name):
         reason = f" ({i.park_reason.value} from {i.parked_from.value})" \
             if i.park_reason and i.parked_from else ""
         pr = f" PR !{i.pr_id}" if i.pr_id else ""
+        last = store.last_event_ts(i.id)
+        seen = f"last {_ago(now - last)} ago" if last else "no events"
+        denied = sum((i.data.get("denial_counts") or {}).values())
+        stale = " STALE" if last and i.stage in ACTIVE_STAGES and now - last > stale_after \
+            else ""
         print(f"#{i.id:<6} {i.stage.value:<15}{reason}{pr}  attempt {i.attempt}  "
-              f"{i.usage.tokens:,} tok  {i.title[:60]}")
+              f"{i.usage.tokens:,} tok  {seen}  denied {denied}{stale}  {i.title[:60]}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging(Path(args.logs))
     target = load_target(Path(args.target))
     store = _store(args.db)
+    traces = Path(args.traces)
 
     if args.cmd == "pause":
         store.set_flag("paused", "1")
+        store.add_event("pause")
     elif args.cmd == "resume":
         store.set_flag("paused", None)
         store.set_flag("paused_until", None)
+        store.add_event("resume")
     elif args.cmd == "status":
         _status(target, store)
+    elif args.cmd == "trace":
+        try:
+            print(render_trace(store, args.item_id, args.full))
+        except KeyError:
+            print(f"no item #{args.item_id}")
+            return 1
     elif args.cmd == "requeue":
         if args.local:
-            store.save(requeue(store.get(args.item_id)))
+            item = store.get(args.item_id)
+            new = requeue(item)
+            store.save(new, events=[EventInput("requeue", {
+                "from_reason": item.park_reason.value if item.park_reason else None,
+                "to": new.stage.value, "approved": False, "local": True})], at=item)
         else:
-            scheduler, *_ = _runtime(target, store, Path(args.workspaces), False)
+            scheduler, *_ = _runtime(target, store, Path(args.workspaces), False, traces)
             scheduler.requeue_item(args.item_id)
     elif args.cmd == "calibrate":
         gates = [args.gate] if args.gate else sorted(GATES)
@@ -129,13 +179,15 @@ def main(argv: list[str] | None = None) -> int:
                       f"acc={r.accuracy:.3f} mode={r.mode} — {r.message}")
     elif args.cmd == "label":
         if args.gate == "triage":
-            _, ado, decider = _runtime(target, store, Path(args.workspaces), True)
+            _, ado, decider = _runtime(target, store, Path(args.workspaces), True, traces)
             n = label_triage(ado, decider, store, args.limit, input)
         else:
             n = label_logged(store, args.gate, args.limit, input)
         print(f"recorded {n} labels")
     elif args.cmd == "run":
-        scheduler, *_ = _runtime(target, store, Path(args.workspaces), args.dry_run_push)
+        store.set_flag("poll_s", str(args.poll))
+        scheduler, *_ = _runtime(target, store, Path(args.workspaces), args.dry_run_push,
+                                 traces)
         if args.once:
             asyncio.run(scheduler.tick())
         else:

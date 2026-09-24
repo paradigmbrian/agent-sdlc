@@ -16,6 +16,15 @@ def git(*args: str, cwd: Path) -> str:
     ).stdout
 
 
+@pytest.fixture(autouse=True)
+def _isolated_state_dirs(tmp_path_factory: pytest.TempPathFactory,
+                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI tests must never write logs or traces under the real ~/.agent-sdlc."""
+    base = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("AGENT_SDLC_LOGS", str(base / "logs"))
+    monkeypatch.setenv("AGENT_SDLC_TRACES", str(base / "traces"))
+
+
 @pytest.fixture
 def origin_repo(tmp_path: Path) -> Path:
     src = tmp_path / "src"

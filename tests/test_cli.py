@@ -1,4 +1,6 @@
+import logging
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -58,3 +60,48 @@ def test_m12_defaults_resolve_from_project_root(
     assert Path(args.workspaces) == ROOT / "workspaces"
     assert main(["--db", db, "status"]) == 0
     assert "target: rallysource" in capsys.readouterr().out
+
+
+def test_trace_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    store = Store(db)
+    store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "agent/9-a")
+    store.add_event("intake", {"branch": "agent/9-a"}, item=store.get(9))
+    assert run(db, "trace", "9") == 0
+    assert "branch agent/9-a" in capsys.readouterr().out
+    assert run(db, "trace", "404") == 1
+    assert "no item #404" in capsys.readouterr().out
+
+
+def test_status_shows_last_tick_and_stale(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    store = Store(db)
+    now = datetime.now(UTC)
+    store.set_flag("last_tick", (now - timedelta(minutes=10)).isoformat())
+    store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "b")
+    store.save(replace(store.get(9), stage=Stage.PLAN,
+                       data={"denial_counts": {"planner": 2}}))
+    store.add_event("intake", {}, item=store.get(9), ts=now - timedelta(hours=3))
+    assert run(db, "status") == 0
+    out = capsys.readouterr().out
+    assert "last tick: 10m ago  LOOP NOT RUNNING?" in out
+    assert "denied 2" in out and "STALE" in out
+
+
+def test_pause_and_local_requeue_write_events(db: str) -> None:
+    assert run(db, "pause") == 0
+    store = Store(db)
+    assert [e.kind for e in store.events_since(datetime(2000, 1, 1, tzinfo=UTC))] == ["pause"]
+    store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "b")
+    store.save(replace(store.get(9), stage=Stage.PARKED, park_reason=ParkReason.RED,
+                       parked_from=Stage.VERIFY))
+    assert run(db, "requeue", "9", "--local") == 0
+    [rq] = Store(db).events_for(9)
+    assert rq.kind == "requeue" and rq.payload["to"] == "verify"
+
+
+def test_cli_writes_log_file(db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_SDLC_LOGS", str(tmp_path / "logs"))
+    assert run(db, "status") == 0
+    logging.getLogger("agent_sdlc.cli_test").info("hello from test")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    assert "hello from test" in (tmp_path / "logs" / "agent-sdlc.log").read_text()
