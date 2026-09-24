@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from laya_sdlc.agents.roles import Role
-from laya_sdlc.decisions.gates import GATES, option_keys
-from laya_sdlc.types import AgentResult, Decision, PrComment, Usage, WorkItem
+from agent_sdlc.agents.roles import Role
+from agent_sdlc.decisions.gates import GATES, option_keys
+from agent_sdlc.types import AgentResult, Decision, PrComment, Usage, WorkItem
 
 
 def decision(gate: str, q: str, answer: str, actionable: bool = True) -> Decision:
@@ -77,7 +77,7 @@ class FakeAdo:
         self.tags[wi.id] = set(wi.tags)
 
     def list_intake(self) -> list[WorkItem]:
-        return [wi for i, wi in self.items.items() if "laya" in self.tags[i]]
+        return [wi for i, wi in self.items.items() if "agent" in self.tags[i]]
 
     def list_closed(self, limit: int) -> list[WorkItem]:
         return list(self.items.values())[:limit]
@@ -95,7 +95,7 @@ class FakeAdo:
         return tag in self.tags[id]
 
     def push_branch(self, worktree: Path, branch: str) -> None:
-        assert branch.startswith("laya/")
+        assert branch.startswith("agent/")
         if self.origin is not None:
             subprocess.run(["git", "push", str(self.origin), f"HEAD:refs/heads/{branch}"],
                            cwd=worktree, check=True, capture_output=True)

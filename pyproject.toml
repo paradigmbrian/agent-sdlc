@@ -1,5 +1,5 @@
 [project]
-name = "laya-sdlc"
+name = "agent-sdlc"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-laya-sdlc = "laya_sdlc.cli:main"
+agent-sdlc = "agent_sdlc.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -50,5 +50,5 @@ select = ["E", "F", "I", "B", "UP"]
 [tool.mypy]
 strict = true
 ignore_missing_imports = true
-packages = ["laya_sdlc"]
+packages = ["agent_sdlc"]
 mypy_path = "src"

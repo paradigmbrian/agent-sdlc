@@ -3,10 +3,10 @@ from datetime import date
 
 import pytest
 
-from laya_sdlc.store import LabelInput, Store
-from laya_sdlc.types import Calibration, Decision, ParkReason, Stage, Usage, WorkItem
+from agent_sdlc.store import LabelInput, Store
+from agent_sdlc.types import Calibration, Decision, ParkReason, Stage, Usage, WorkItem
 
-WI = WorkItem(1, "Fix login", "desc", "ac", "Bug", ("laya",), "https://x/1")
+WI = WorkItem(1, "Fix login", "desc", "ac", "Bug", ("agent",), "https://x/1")
 
 
 def _decision(q: str = "clarity", answer: str = "clear") -> Decision:
@@ -20,11 +20,11 @@ def store() -> Store:
 
 
 def test_add_item_dedupes_forever(store: Store) -> None:
-    assert store.add_item("t", WI, "laya/1-fix-login") is True
+    assert store.add_item("t", WI, "agent/1-fix-login") is True
     item = store.get(1)
-    assert item.stage is Stage.TRIAGE and item.branch == "laya/1-fix-login"
+    assert item.stage is Stage.TRIAGE and item.branch == "agent/1-fix-login"
     store.save(replace(item, stage=Stage.DONE))
-    assert store.add_item("t", WI, "laya/1-fix-login") is False
+    assert store.add_item("t", WI, "agent/1-fix-login") is False
 
 
 def test_save_roundtrip(store: Store) -> None:
@@ -95,7 +95,7 @@ def test_calibration_roundtrip(store: Store) -> None:
 
 
 def test_i4_usage_cache_reads_roundtrip_and_old_dicts_load() -> None:
-    from laya_sdlc.types import Usage as U
+    from agent_sdlc.types import Usage as U
     u = U(1, 2, 3, cache_read_tokens=4)
     assert U.from_dict(u.to_dict()) == u and u.tokens == 5
     assert U.from_dict({"turns": 1, "input_tokens": 2, "output_tokens": 3}) == U(1, 2, 3, 0)

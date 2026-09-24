@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from laya_sdlc.decisions.decider import Decider, interpret, normalize_answer
-from laya_sdlc.decisions.gates import GATES, option_keys
-from laya_sdlc.types import Calibration
+from agent_sdlc.decisions.decider import Decider, interpret, normalize_answer
+from agent_sdlc.decisions.gates import GATES, option_keys
+from agent_sdlc.types import Calibration
 
 FIXTURE = Path(__file__).parent / "fixtures" / "laya_triage_sample.json"
 NOUL = {"type": "noul", "instructions": "x"}

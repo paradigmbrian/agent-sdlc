@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from laya_sdlc.orchestrator.transitions import (
+from agent_sdlc.orchestrator.transitions import (
     CommentOutcome,
     Transition,
     after_implement,
@@ -16,7 +16,7 @@ from laya_sdlc.orchestrator.transitions import (
     park,
     requeue,
 )
-from laya_sdlc.types import CommandResult, Decision, Item, ParkReason, PrComment, Stage
+from agent_sdlc.types import CommandResult, Decision, Item, ParkReason, PrComment, Stage
 
 
 def d(q: str, answer: str, actionable: bool = True, conf: float = 0.9) -> Decision:
@@ -25,7 +25,7 @@ def d(q: str, answer: str, actionable: bool = True, conf: float = 0.9) -> Decisi
 
 GOOD_TRIAGE = {"kind": d("kind", "bug"), "clarity": d("clarity", "clear"),
                "touches_protected": d("touches_protected", "no"), "size": d("size", "small")}
-ITEM = Item(1, "t", "Fix", "laya/1-fix", Stage.TRIAGE)
+ITEM = Item(1, "t", "Fix", "agent/1-fix", Stage.TRIAGE)
 OK = CommandResult("test", "t", 0, "ok", 1.0)
 BAD = CommandResult("test", "t", 1, "boom", 1.0)
 
@@ -87,7 +87,7 @@ def test_review_transitions() -> None:
 
 
 def test_classify_comment() -> None:
-    c = PrComment(1, 1, "Brian", "/laya rename foo to bar")
+    c = PrComment(1, 1, "Brian", "/agent rename foo to bar")
     assert classify_comment(c, None) == "change_request"
     plain = PrComment(1, 2, "Brian", "hmm")
     result = classify_comment(plain, {"comment_intent": d("comment_intent", "question")})
@@ -97,12 +97,12 @@ def test_classify_comment() -> None:
 
 
 def test_pr_poll_transitions() -> None:
-    c = PrComment(1, 1, "Brian", "/laya fix")
+    c = PrComment(1, 1, "Brian", "/agent fix")
     assert after_pr_poll("completed", [], 0, 3).to is Stage.DONE
     assert after_pr_poll("abandoned", [], 0, 3).to is Stage.CLOSED
     assert after_pr_poll("active", [], 0, 3).to is Stage.AWAITING_HUMAN
     t = after_pr_poll("active", [CommentOutcome(c, "change_request")], 0, 3)
-    assert t.to is Stage.IMPLEMENT and t.count_pr_round and "/laya fix" in (t.feedback or "")
+    assert t.to is Stage.IMPLEMENT and t.count_pr_round and "/agent fix" in (t.feedback or "")
     assert after_pr_poll("active", [CommentOutcome(c, "change_request")], 3, 3).park_reason \
         is ParkReason.PR_ROUNDS
 
@@ -137,7 +137,7 @@ def test_requeue_non_gate_park_resumes_with_fresh_counters() -> None:
 
 
 def test_requeue_budget_resets_budget_offset() -> None:
-    from laya_sdlc.types import Usage
+    from agent_sdlc.types import Usage
     parked = apply_transition(Item(1, "t", "x", "b", Stage.IMPLEMENT, usage=Usage(5, 900, 100)),
                               park(ParkReason.BUDGET, "b"))
     assert requeue(parked).data["budget_offset"] == 1000
@@ -147,15 +147,15 @@ def test_requeue_budget_resets_budget_offset() -> None:
 
 
 def test_i5_pr_rounds_park_keeps_feedback_and_requeues_to_implement() -> None:
-    c = PrComment(1, 1, "Brian", "/laya rename foo")
+    c = PrComment(1, 1, "Brian", "/agent rename foo")
     t = after_pr_poll("active", [CommentOutcome(c, "change_request")], 3, 3)
-    assert t.park_reason is ParkReason.PR_ROUNDS and "/laya rename foo" in (t.feedback or "")
+    assert t.park_reason is ParkReason.PR_ROUNDS and "/agent rename foo" in (t.feedback or "")
     waiting = Item(1, "t", "x", "b", Stage.AWAITING_HUMAN, pr_rounds=3, pr_id=7)
     parked = apply_transition(waiting, t)
-    assert "/laya rename foo" in parked.data["feedback"]
+    assert "/agent rename foo" in parked.data["feedback"]
     item = requeue(parked)
     assert item.stage is Stage.IMPLEMENT and item.pr_rounds == 0
-    assert "/laya rename foo" in item.data["feedback"] and item.pr_id == 7
+    assert "/agent rename foo" in item.data["feedback"] and item.pr_id == 7
 
 
 def test_m1_confident_review_clears_stale_note() -> None:
@@ -174,8 +174,8 @@ def test_c1_requeue_drops_parked_tag_set() -> None:
 
 @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPLEMENT, Stage.REVIEW])
 def test_agent_error_park_is_not_a_gate_and_requeue_retries_stage(stage: Stage) -> None:
-    from laya_sdlc.orchestrator.transitions import after_agent_error
-    from laya_sdlc.types import GATE_PARKS
+    from agent_sdlc.orchestrator.transitions import after_agent_error
+    from agent_sdlc.types import GATE_PARKS
 
     t = after_agent_error(stage, "error_max_turns", 3, 3)
     assert t.park_reason is ParkReason.AGENT_ERROR

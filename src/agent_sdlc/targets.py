@@ -12,10 +12,10 @@ class AdoConfig(BaseModel):
     org: str
     project: str
     repo: str
-    intake_tag: str = "laya"
-    parked_tag: str = "laya:parked"
+    intake_tag: str = "agent"
+    parked_tag: str = "agent:parked"
     base_branch: str = "dev"
-    branch_prefix: str = "laya/"
+    branch_prefix: str = "agent/"
 
     @property
     def repo_https_url(self) -> str:

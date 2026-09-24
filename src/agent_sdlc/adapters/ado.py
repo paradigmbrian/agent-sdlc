@@ -8,10 +8,10 @@ from typing import Any
 
 import httpx
 
-from laya_sdlc.secrets import basic_auth_header
-from laya_sdlc.targets import AdoConfig
-from laya_sdlc.types import PrComment, WorkItem
-from laya_sdlc.workspaces import git_env
+from agent_sdlc.secrets import basic_auth_header
+from agent_sdlc.targets import AdoConfig
+from agent_sdlc.types import PrComment, WorkItem
+from agent_sdlc.workspaces import git_env
 
 log = logging.getLogger(__name__)
 API = "7.1"

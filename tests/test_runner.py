@@ -6,16 +6,16 @@ from typing import Any
 
 import pytest
 
-from laya_sdlc.agents.roles import (
+from agent_sdlc.agents.roles import (
     IMPLEMENTER,
     PLANNER,
     REVIEWER,
     implementer_prompt,
     reviewer_prompt,
 )
-from laya_sdlc.agents.runner import ClaudeAgentRunner, agent_env, check_tool, parse_usage_limit
-from laya_sdlc.policy import CommandPolicy, PathPolicy
-from laya_sdlc.types import (
+from agent_sdlc.agents.runner import ClaudeAgentRunner, agent_env, check_tool, parse_usage_limit
+from agent_sdlc.policy import CommandPolicy, PathPolicy
+from agent_sdlc.types import (
     AgentInfraError,
     AgentInterrupted,
     CommandResult,
@@ -26,7 +26,7 @@ from laya_sdlc.types import (
 
 PP = PathPolicy(["infra/**", "**/.env*"])
 CP = CommandPolicy(["npm test"])
-WI = WorkItem(5, "Fix login", "Login broken", "Login works", "Bug", ("laya",), "u")
+WI = WorkItem(5, "Fix login", "Login broken", "Login works", "Bug", ("agent",), "u")
 
 
 def test_role_tools() -> None:
@@ -118,9 +118,9 @@ def test_agent_env_isolates_config(tmp_path: Path) -> None:
 
 
 def test_agent_env_blanks_ado_pat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LAYA_SDLC_ADO_PAT", "secret")
+    monkeypatch.setenv("AGENT_SDLC_ADO_PAT", "secret")
     env = agent_env(tmp_path, {})
-    assert env["LAYA_SDLC_ADO_PAT"] == ""
+    assert env["AGENT_SDLC_ADO_PAT"] == ""
 
 
 def test_agent_env_blanks_inactive_anthropic_key(

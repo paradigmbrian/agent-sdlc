@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from laya_sdlc.orchestrator.reporting import (
+from agent_sdlc.orchestrator.reporting import (
     MAX_PR_DESCRIPTION,
     commit_message,
     park_comment_html,
@@ -8,10 +8,10 @@ from laya_sdlc.orchestrator.reporting import (
     pr_body,
     pr_title,
 )
-from laya_sdlc.types import Decision, Item, ParkReason, Stage, Usage, WorkItem
+from agent_sdlc.types import Decision, Item, ParkReason, Stage, Usage, WorkItem
 
-WI = WorkItem(5, "Approve <button> broken", "d", "ac", "Bug", ("laya",), "https://x/5")
-ITEM = Item(5, "t", WI.title, "laya/5-x", Stage.PR_OPEN, attempt=1,
+WI = WorkItem(5, "Approve <button> broken", "d", "ac", "Bug", ("agent",), "https://x/5")
+ITEM = Item(5, "t", WI.title, "agent/5-x", Stage.PR_OPEN, attempt=1,
             data={"plan": "1. fix it", "note": ""}, usage=Usage(12, 30000, 4000))
 DEC = [Decision("review", "risk", "low", {"low": 0.9}, {"low": 0.9}, 0.9, True, False)]
 CHECKS = [{"name": "test", "command": "npm test", "exit_code": 0, "output": "ok",
@@ -42,7 +42,7 @@ def test_park_comment_escapes_html() -> None:
                 parked_from=Stage.VERIFY, data={"park_note": "<script>boom</script>"})
     html = park_comment_html(item)
     assert "&lt;script&gt;" in html and "<script>" not in html
-    assert "laya:parked" in html and "red" in html
+    assert "agent:parked" in html and "red" in html
 
 
 def test_park_comment_gate_park_from_triage() -> None:

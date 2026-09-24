@@ -4,7 +4,7 @@ from pathlib import Path
 
 from laya import Router
 
-from laya_sdlc.decisions.gates import GATES
+from agent_sdlc.decisions.gates import GATES
 
 STATE = {
     "type": "Bug",

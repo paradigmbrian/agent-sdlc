@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from laya_sdlc.targets import TargetConfig
+from agent_sdlc.targets import TargetConfig
 
 
 def git(*args: str, cwd: Path) -> str:

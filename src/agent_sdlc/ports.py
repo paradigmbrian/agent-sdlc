@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Protocol
 
-from laya_sdlc.agents.roles import Role
-from laya_sdlc.types import AgentResult, CommandResult, Decision, PrComment, WorkItem
+from agent_sdlc.agents.roles import Role
+from agent_sdlc.types import AgentResult, CommandResult, Decision, PrComment, WorkItem
 
 
 class AgentRunner(Protocol):

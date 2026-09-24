@@ -8,7 +8,7 @@ from typing import Any, Literal
 from sqlalchemy import JSON, ForeignKey, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from laya_sdlc.types import Calibration, Decision, Item, ParkReason, Stage, Usage, WorkItem
+from agent_sdlc.types import Calibration, Decision, Item, ParkReason, Stage, Usage, WorkItem
 
 
 def _now() -> datetime:

@@ -5,10 +5,10 @@ import httpx
 import pytest
 import respx
 
-from laya_sdlc.adapters.ado import API, AdoClient, AdoError, html_to_text
-from laya_sdlc.secrets import SecretNotFound, basic_auth_header, get_secret
-from laya_sdlc.targets import AdoConfig, TargetConfig
-from laya_sdlc.workspaces import Workspaces
+from agent_sdlc.adapters.ado import API, AdoClient, AdoError, html_to_text
+from agent_sdlc.secrets import SecretNotFound, basic_auth_header, get_secret
+from agent_sdlc.targets import AdoConfig, TargetConfig
+from agent_sdlc.workspaces import Workspaces
 from tests.conftest import git
 
 BASE = "https://dev.azure.com/MilesThurman"
@@ -23,7 +23,9 @@ def client() -> AdoClient:
     return AdoClient(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")))
 
 
-def _wi(id_: int, desc: str = "<div>Hello<br>world</div>", tags: str = "laya") -> dict[str, object]:
+def _wi(
+    id_: int, desc: str = "<div>Hello<br>world</div>", tags: str = "agent"
+) -> dict[str, object]:
     return {"id": id_, "fields": {
         "System.Title": f"Item {id_}", "System.Description": desc,
         "Microsoft.VSTS.Common.AcceptanceCriteria": "<ul><li>a</li><li>b</li></ul>",
@@ -40,11 +42,11 @@ def test_basic_auth_header() -> None:
 
 
 def test_get_secret_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LAYA_TEST_SECRET", "v")
-    assert get_secret("laya-test-secret-that-does-not-exist", "LAYA_TEST_SECRET") == "v"
-    monkeypatch.delenv("LAYA_TEST_SECRET")
+    monkeypatch.setenv("AGENT_SDLC_TEST_SECRET", "v")
+    assert get_secret("agent-sdlc-test-secret-that-does-not-exist", "AGENT_SDLC_TEST_SECRET") == "v"
+    monkeypatch.delenv("AGENT_SDLC_TEST_SECRET")
     with pytest.raises(SecretNotFound):
-        get_secret("laya-test-secret-that-does-not-exist", "LAYA_TEST_SECRET")
+        get_secret("agent-sdlc-test-secret-that-does-not-exist", "AGENT_SDLC_TEST_SECRET")
 
 
 @respx.mock
@@ -56,30 +58,30 @@ def test_list_intake_queries_tag_and_fetches(client: AdoClient) -> None:
     items = client.list_intake()
     assert [i.id for i in items] == [5, 6]
     query = json.loads(wiql.calls[0].request.content)["query"]
-    assert "CONTAINS 'laya'" in query and "NOT IN ('Closed', 'Removed', 'Done')" in query
+    assert "CONTAINS 'agent'" in query and "NOT IN ('Closed', 'Removed', 'Done')" in query
 
 
 @respx.mock
 def test_get_work_items_strips_html(client: AdoClient) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
-        return_value=httpx.Response(200, json={"value": [_wi(5, tags="laya; laya:parked")]}))
+        return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent; agent:parked")]}))
     [wi] = client.get_work_items([5])
     assert wi.description == "Hello\nworld"
     assert wi.acceptance_criteria == "a\nb"
-    assert wi.tags == ("laya", "laya:parked")
+    assert wi.tags == ("agent", "agent:parked")
     assert wi.url.endswith("/_workitems/edit/5")
 
 
 @respx.mock
 def test_set_tag_add_and_remove(client: AdoClient) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
-        return_value=httpx.Response(200, json={"value": [_wi(5, tags="laya")]}))
+        return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent")]}))
     patch = respx.patch(f"{PROJ}/wit/workitems/5").mock(return_value=httpx.Response(200, json={}))
-    client.set_tag(5, "laya:parked", True)
+    client.set_tag(5, "agent:parked", True)
     body = json.loads(patch.calls[0].request.content)
-    assert body == [{"op": "add", "path": "/fields/System.Tags", "value": "laya; laya:parked"}]
+    assert body == [{"op": "add", "path": "/fields/System.Tags", "value": "agent; agent:parked"}]
     assert patch.calls[0].request.headers["content-type"] == "application/json-patch+json"
-    client.set_tag(5, "laya", False)
+    client.set_tag(5, "agent", False)
     assert json.loads(patch.calls[1].request.content)[0]["value"] == ""
 
 
@@ -87,14 +89,14 @@ def test_set_tag_add_and_remove(client: AdoClient) -> None:
 def test_create_pr_payload(client: AdoClient) -> None:
     route = respx.post(f"{REPO}/pullrequests").mock(
         return_value=httpx.Response(201, json={"pullRequestId": 42}))
-    assert client.create_pr("laya/5-x", "fix: x", "body", 5) == 42
+    assert client.create_pr("agent/5-x", "fix: x", "body", 5) == 42
     sent = json.loads(route.calls[0].request.content)
-    assert sent["sourceRefName"] == "refs/heads/laya/5-x"
+    assert sent["sourceRefName"] == "refs/heads/agent/5-x"
     assert sent["targetRefName"] == "refs/heads/dev"
     assert sent["workItemRefs"] == [{"id": "5"}]
 
 
-def test_create_pr_refuses_non_laya_branch(client: AdoClient) -> None:
+def test_create_pr_refuses_non_agent_branch(client: AdoClient) -> None:
     with pytest.raises(AdoError):
         client.create_pr("dev", "t", "b", 5)
 
@@ -109,7 +111,7 @@ def test_pr_comments_skip_self_and_system(client: AdoClient) -> None:
                 {"id": 1, "commentType": "text", "content": "please rename",
                  "author": {"id": "human", "displayName": "Brian"}},
                 {"id": 2, "commentType": "text", "content": "done",
-                 "author": {"id": SELF_ID, "displayName": "laya"}},
+                 "author": {"id": SELF_ID, "displayName": "agent"}},
                 {"id": 3, "commentType": "system", "content": "vote",
                  "author": {"id": "human", "displayName": "Brian"}},
                 {"id": 4, "commentType": "text", "content": "gone", "isDeleted": True,
@@ -129,11 +131,11 @@ def test_pr_status_and_delete_branch(client: AdoClient) -> None:
         return_value=httpx.Response(200, json={"status": "completed"}))
     assert client.pr_status(42) == "completed"
     respx.get(f"{REPO}/refs").mock(return_value=httpx.Response(
-        200, json={"value": [{"name": "refs/heads/laya/5-x", "objectId": "abc"}]}))
+        200, json={"value": [{"name": "refs/heads/agent/5-x", "objectId": "abc"}]}))
     post = respx.post(f"{REPO}/refs").mock(return_value=httpx.Response(200, json={}))
-    client.delete_branch("laya/5-x")
+    client.delete_branch("agent/5-x")
     assert json.loads(post.calls[0].request.content) == [
-        {"name": "refs/heads/laya/5-x", "oldObjectId": "abc", "newObjectId": "0" * 40}]
+        {"name": "refs/heads/agent/5-x", "oldObjectId": "abc", "newObjectId": "0" * 40}]
 
 
 @respx.mock
@@ -162,8 +164,8 @@ def test_comment_work_item_uses_preview_api(client: AdoClient) -> None:
 @respx.mock
 def test_has_tag_true_and_false(client: AdoClient) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
-        return_value=httpx.Response(200, json={"value": [_wi(5, tags="laya; laya:parked")]}))
-    assert client.has_tag(5, "laya:parked") is True
+        return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent; agent:parked")]}))
+    assert client.has_tag(5, "agent:parked") is True
     assert client.has_tag(5, "nope") is False
 
 
@@ -200,7 +202,7 @@ def test_dry_run_pr_methods_make_no_http_calls() -> None:
                        dry_run_push=True)
     client.comment_pr(0, "x")
     client.reply_pr(0, 1, 1, "x")
-    client.delete_branch("laya/5-x")
+    client.delete_branch("agent/5-x")
     assert client.pr_status(0) == "active"
     assert client.pr_comments(0) == []
     assert respx.calls.call_count == 0
@@ -209,12 +211,12 @@ def test_dry_run_pr_methods_make_no_http_calls() -> None:
 def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
                                      origin_repo: Path) -> None:
     ws = Workspaces(tmp_path / "w", target)
-    wt = ws.create(5, "laya/5-x")
+    wt = ws.create(5, "agent/5-x")
     (wt / "f.txt").write_text("x")
     ws.commit(wt, "feat: f")
     client = AdoClient(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo))
-    client.push_branch(wt, "laya/5-x")
-    assert "laya/5-x" in git("branch", "--list", "laya/*", cwd=origin_repo)
+    client.push_branch(wt, "agent/5-x")
+    assert "agent/5-x" in git("branch", "--list", "agent/*", cwd=origin_repo)
     with pytest.raises(AdoError):
         client.push_branch(wt, "dev")
 
@@ -222,9 +224,9 @@ def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
 def test_push_branch_dry_run_does_nothing(tmp_path: Path, target: TargetConfig,
                                           origin_repo: Path) -> None:
     ws = Workspaces(tmp_path / "w", target)
-    wt = ws.create(5, "laya/5-x")
+    wt = ws.create(5, "agent/5-x")
     client = AdoClient(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo),
                        dry_run_push=True)
-    client.push_branch(wt, "laya/5-x")
-    assert git("branch", "--list", "laya/*", cwd=origin_repo) == ""
-    assert client.create_pr("laya/5-x", "t", "b", 5) == 0
+    client.push_branch(wt, "agent/5-x")
+    assert git("branch", "--list", "agent/*", cwd=origin_repo) == ""
+    assert client.create_pr("agent/5-x", "t", "b", 5) == 0

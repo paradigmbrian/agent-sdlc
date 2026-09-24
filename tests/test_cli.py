@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from laya_sdlc.cli import main
-from laya_sdlc.store import Store
-from laya_sdlc.types import ParkReason, Stage, WorkItem
+from agent_sdlc.cli import main
+from agent_sdlc.store import Store
+from agent_sdlc.types import ParkReason, Stage, WorkItem
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +28,7 @@ def test_pause_resume(db: str) -> None:
 
 def test_status_lists_items(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     store = Store(db)
-    store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "laya/9-fix-it")
+    store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "agent/9-fix-it")
     assert run(db, "status") == 0
     out = capsys.readouterr().out
     assert "#9" in out and "triage" in out and "paused: no" in out
@@ -50,8 +50,8 @@ def test_m12_defaults_resolve_from_project_root(
     db: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from laya_sdlc.cli import _parser
-    monkeypatch.delenv("LAYA_SDLC_TARGET", raising=False)
+    from agent_sdlc.cli import _parser
+    monkeypatch.delenv("AGENT_SDLC_TARGET", raising=False)
     monkeypatch.chdir(tmp_path)
     args = _parser().parse_args(["status"])
     assert Path(args.target) == ROOT / "targets" / "rallysource.yaml"

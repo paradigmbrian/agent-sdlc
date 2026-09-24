@@ -3,10 +3,10 @@ ado:
   org: MilesThurman
   project: CodvoMigration
   repo: RallySource
-  intake_tag: laya
-  parked_tag: "laya:parked"
+  intake_tag: agent
+  parked_tag: "agent:parked"
   base_branch: dev
-  branch_prefix: laya/
+  branch_prefix: agent/
 repo:
   install: npm ci
   commands:

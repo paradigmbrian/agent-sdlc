@@ -5,13 +5,13 @@ from pathlib import Path
 import httpx
 import pytest
 
-from laya_sdlc.orchestrator.scheduler import Scheduler
-from laya_sdlc.orchestrator.stages import StageExecutor, StepResult
-from laya_sdlc.orchestrator.transitions import Transition, park
-from laya_sdlc.policy import PathPolicy
-from laya_sdlc.store import Store
-from laya_sdlc.targets import RunWindow, TargetConfig
-from laya_sdlc.types import (
+from agent_sdlc.orchestrator.scheduler import Scheduler
+from agent_sdlc.orchestrator.stages import StageExecutor, StepResult
+from agent_sdlc.orchestrator.transitions import Transition, park
+from agent_sdlc.policy import PathPolicy
+from agent_sdlc.store import Store
+from agent_sdlc.targets import RunWindow, TargetConfig
+from agent_sdlc.types import (
     AgentInfraError,
     Item,
     ParkReason,
@@ -20,11 +20,11 @@ from laya_sdlc.types import (
     UsageLimitError,
     WorkItem,
 )
-from laya_sdlc.workspaces import Workspaces
+from agent_sdlc.workspaces import Workspaces
 from tests.fakes import FakeAdo, FakeDecider, FakeRunner
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
-WI = WorkItem(5, "Add feature", "d", "ac", "Bug", ("laya",), "u")
+WI = WorkItem(5, "Add feature", "d", "ac", "Bug", ("agent",), "u")
 
 
 class ScriptedExecutor:
@@ -81,7 +81,7 @@ async def test_intake_adds_item_with_branch(env) -> None:  # type: ignore[no-unt
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
     await sched(env, ex).tick()
     item = env[0].get(5)
-    assert item.branch == "laya/5-add-feature" and item.stage is Stage.PLAN
+    assert item.branch == "agent/5-add-feature" and item.stage is Stage.PLAN
 
 
 async def test_step_merges_data_and_usage(env) -> None:  # type: ignore[no-untyped-def]
@@ -102,7 +102,7 @@ async def test_parking_comments_and_tags(env) -> None:  # type: ignore[no-untype
     store, ado, *_ = env
     await sched(env, ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))).tick()
     assert store.get(5).stage is Stage.PARKED
-    assert "laya:parked" in ado.tags[5]
+    assert "agent:parked" in ado.tags[5]
     assert "unclear" in ado.wi_comments[0][1]
 
 
@@ -115,7 +115,7 @@ async def test_removing_tag_requeues_with_labels(env) -> None:  # type: ignore[n
     s = sched(env, real)
     await s.tick()
     assert store.get(5).park_reason is ParkReason.NEEDS_HUMAN
-    ado.set_tag(5, "laya:parked", False)
+    ado.set_tag(5, "agent:parked", False)
     s._executor = ScriptedExecutor(StepResult(Transition(Stage.IMPLEMENT)))  # stop after requeue
     await s.tick()
     assert store.get(5).stage is Stage.IMPLEMENT  # requeued to PLAN, then stepped once
@@ -166,9 +166,9 @@ async def test_run_window_blocks_agent_stages_not_polling(env) -> None:  # type:
     store, ado, ws, target = env
     night = target.model_copy(update={"limits": target.limits.model_copy(
         update={"run_window": RunWindow(start=time(19), end=time(7))})})
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
-    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)))
     await Scheduler(target=night, store=store, executor=ex, ado=ado, workspaces=ws,
                     clock=lambda: NOW).tick()
@@ -178,8 +178,8 @@ async def test_run_window_blocks_agent_stages_not_polling(env) -> None:  # type:
 async def test_concurrency_prefers_in_flight(env) -> None:  # type: ignore[no-untyped-def]
     store, ado, *_ = env
     ado.add(replace(WI, id=6, title="Other"))
-    store.add_item("fixture", replace(WI, id=6), "laya/6-other")
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", replace(WI, id=6), "agent/6-other")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.IMPLEMENT))
     ex = ScriptedExecutor(StepResult(Transition(Stage.VERIFY)))
     await sched(env, ex).tick()
@@ -188,13 +188,13 @@ async def test_concurrency_prefers_in_flight(env) -> None:  # type: ignore[no-un
 
 async def test_done_cleans_up(env) -> None:  # type: ignore[no-untyped-def]
     store, ado, ws, _ = env
-    store.add_item("fixture", WI, "laya/5-add-feature")
-    ws.create(5, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    ws.create(5, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
     await sched(env, ScriptedExecutor(StepResult(Transition(Stage.DONE)))).tick()
     assert store.get(5).stage is Stage.DONE
     assert not ws.worktree_path(5).exists()
-    assert ado.deleted_branches == ["laya/5-add-feature"]
+    assert ado.deleted_branches == ["agent/5-add-feature"]
 
 
 async def test_intake_error_still_polls_and_steps(  # type: ignore[no-untyped-def]
@@ -204,9 +204,9 @@ async def test_intake_error_still_polls_and_steps(  # type: ignore[no-untyped-de
     ado = RaisingAdo(fail={"list_intake"})
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
-    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)),
                           StepResult(Transition(Stage.PLAN)))
     s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
@@ -222,10 +222,10 @@ async def test_has_tag_error_skips_item_others_continue(  # type: ignore[no-unty
     ado = RaisingAdo(fail={"has_tag"})
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
                        parked_from=Stage.TRIAGE, data={"parked_tag_set": True}))
-    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
     s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
                  clock=lambda: NOW)
@@ -241,7 +241,7 @@ async def test_requeue_item_set_tag_error_still_requeues(  # type: ignore[no-unt
     ado = RaisingAdo(fail={"set_tag"})
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
                        parked_from=Stage.TRIAGE))
     s = Scheduler(target=target, store=store, executor=ScriptedExecutor(), ado=ado, workspaces=ws,
@@ -290,7 +290,7 @@ async def test_c1_park_comment_failure_still_tags_and_is_not_requeued(
     ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
     store, ado, s = _flaky(tmp_path, target, ex, comment_work_item=1)
     await s.tick()
-    assert "laya:parked" in ado.tags[5]
+    assert "agent:parked" in ado.tags[5]
     assert store.get(5).data.get("parked_tag_set") is True
     await s.tick()  # the tag is present: nothing is read as human approval
     item = store.get(5)
@@ -303,14 +303,14 @@ async def test_c1_park_set_tag_failure_is_retried_and_never_requeued(
     ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
     store, ado, s = _flaky(tmp_path, target, ex, set_tag=2)
     await s.tick()  # park; set_tag fails
-    assert "laya:parked" not in ado.tags[5] and "parked_tag_set" not in store.get(5).data
+    assert "agent:parked" not in ado.tags[5] and "parked_tag_set" not in store.get(5).data
     assert ado.wi_comments == []  # tag first, then comment
     await s.tick()  # untagged but flag unset: retry side effects (fails again), no requeue
-    assert store.get(5).stage is Stage.PARKED and "laya:parked" not in ado.tags[5]
+    assert store.get(5).stage is Stage.PARKED and "agent:parked" not in ado.tags[5]
     await s.tick()  # retry succeeds
     item = store.get(5)
     assert item.stage is Stage.PARKED and item.data.get("parked_tag_set") is True
-    assert "laya:parked" in ado.tags[5] and len(ado.wi_comments) == 1
+    assert "agent:parked" in ado.tags[5] and len(ado.wi_comments) == 1
     assert len(ex.seen) == 1
 
 
@@ -321,7 +321,7 @@ async def test_c1_removing_tag_after_successful_park_requeues(
                           StepResult(Transition(Stage.IMPLEMENT)))
     store, ado, s = _flaky(tmp_path, target, ex)
     await s.tick()
-    ado.set_tag(5, "laya:parked", False)
+    ado.set_tag(5, "agent:parked", False)
     await s.tick()
     item = store.get(5)
     assert item.stage is Stage.IMPLEMENT and "parked_tag_set" not in item.data
@@ -349,7 +349,7 @@ async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: 
     two = target.model_copy(update={"limits": target.limits.model_copy(
         update={"max_concurrent_items": 2})})
     for i in (5, 6):
-        store.add_item("fixture", replace(WI, id=i), f"laya/{i}-x")
+        store.add_item("fixture", replace(WI, id=i), f"agent/{i}-x")
         store.save(replace(store.get(i), stage=Stage.IMPLEMENT))
     ex = ScriptedExecutor(RuntimeError("boom"), StepResult(Transition(Stage.VERIFY)))
     await Scheduler(target=two, store=store, executor=ex, ado=ado, workspaces=ws,
@@ -362,9 +362,9 @@ async def test_i1_error_polling_awaiting_item_still_steps_active(  # type: ignor
     env
 ) -> None:
     store = env[0]
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
-    store.add_item("fixture", replace(WI, id=6), "laya/6-x")
+    store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(KeyError("pr vanished"), StepResult(Transition(Stage.PLAN)))
     await sched(env, ex).tick()
     assert [i.id for i in ex.seen] == [5, 6]
@@ -399,7 +399,7 @@ async def test_agent_error_park_requeue_retries_stage_without_labels(  # type: i
     from tests.fakes import decision
 
     store, ado, _, _ = env
-    store.add_item("fixture", WI, "laya/5-add-feature")
+    store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.PLAN))
     rejected = decision("plan", "plan_scope_ok", "no")
     ex = ScriptedExecutor(
@@ -409,7 +409,7 @@ async def test_agent_error_park_requeue_retries_stage_without_labels(  # type: i
     s = sched(env, ex)
     await s.tick()
     assert store.get(5).park_reason is ParkReason.AGENT_ERROR
-    ado.set_tag(5, "laya:parked", False)
+    ado.set_tag(5, "agent:parked", False)
     await s.tick()
     assert ex.seen[1].stage is Stage.PLAN  # retried the plan stage, not approved past it
     assert store.labels("plan", "plan_scope_ok") == []

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from laya_sdlc.decisions.gates import work_item_text
-from laya_sdlc.types import CommandResult, WorkItem
+from agent_sdlc.decisions.gates import work_item_text
+from agent_sdlc.types import CommandResult, WorkItem
 
 _READ = ("Read", "Glob", "Grep", "Bash")
 

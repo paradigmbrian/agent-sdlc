@@ -7,8 +7,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from laya_sdlc.targets import TargetConfig
-from laya_sdlc.types import CommandResult
+from agent_sdlc.targets import TargetConfig
+from agent_sdlc.types import CommandResult
 
 # HOME is deliberately absent: repo commands and git get a scratch HOME (C2).
 _SAFE_ENV_KEYS = (
@@ -23,7 +23,7 @@ _SAFE_ENV_KEYS = (
     "TERM",
 )
 _OUTPUT_TAIL = 8000
-_GIT_ID = ["-c", "user.name=laya-sdlc", "-c", "user.email=laya-sdlc@localhost"]
+_GIT_ID = ["-c", "user.name=agent-sdlc", "-c", "user.email=agent-sdlc@localhost"]
 
 
 class GitError(Exception):

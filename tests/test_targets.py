@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from laya_sdlc.targets import RunWindow, TargetConfig, load_target
+from agent_sdlc.targets import RunWindow, TargetConfig, load_target
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -20,7 +20,7 @@ def test_loads_pilot_target() -> None:
     cfg = load_target(ROOT / "targets" / "rallysource.yaml")
     assert cfg.ado.org == "MilesThurman"
     assert cfg.ado.base_branch == "dev"
-    assert cfg.ado.branch_prefix == "laya/"
+    assert cfg.ado.branch_prefix == "agent/"
     assert cfg.clone_url == "https://dev.azure.com/MilesThurman/CodvoMigration/_git/RallySource"
     assert list(cfg.repo.commands) == ["test", "lint", "typecheck", "build"]
     assert "**/prisma/migrations/**" in cfg.policy.protected_paths
@@ -33,7 +33,7 @@ def test_defaults_applied() -> None:
     assert cfg.limits.max_verify_retries == 3
     assert cfg.limits.max_turns == {"plan": 30, "implement": 80, "review": 30}
     assert cfg.laya.default_threshold == 0.8
-    assert cfg.ado.parked_tag == "laya:parked"
+    assert cfg.ado.parked_tag == "agent:parked"
 
 
 def test_clone_url_override() -> None:

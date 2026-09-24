@@ -7,9 +7,9 @@ import os
 import keyring
 from keyring.errors import KeyringError
 
-ADO_PAT = ("laya-sdlc-ado-pat", "LAYA_SDLC_ADO_PAT")
-CLAUDE_TOKEN = ("laya-sdlc-claude-token", "CLAUDE_CODE_OAUTH_TOKEN")
-ANTHROPIC_KEY = ("laya-sdlc-anthropic-key", "ANTHROPIC_API_KEY")
+ADO_PAT = ("agent-sdlc-ado-pat", "AGENT_SDLC_ADO_PAT")
+CLAUDE_TOKEN = ("agent-sdlc-claude-token", "CLAUDE_CODE_OAUTH_TOKEN")
+ANTHROPIC_KEY = ("agent-sdlc-anthropic-key", "ANTHROPIC_API_KEY")
 
 
 class SecretNotFound(Exception):

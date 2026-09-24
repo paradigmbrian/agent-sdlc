@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from laya_sdlc.orchestrator.stages import StageExecutor
-from laya_sdlc.policy import PathPolicy
-from laya_sdlc.targets import TargetConfig
-from laya_sdlc.types import AgentResult, Item, ParkReason, PrComment, Stage, Usage, WorkItem
-from laya_sdlc.workspaces import Workspaces
+from agent_sdlc.orchestrator.stages import StageExecutor
+from agent_sdlc.policy import PathPolicy
+from agent_sdlc.targets import TargetConfig
+from agent_sdlc.types import AgentResult, Item, ParkReason, PrComment, Stage, Usage, WorkItem
+from agent_sdlc.workspaces import Workspaces
 from tests.fakes import FakeAdo, FakeDecider, FakeRunner
 
 WI = WorkItem(5, "Add feature", "Please add feature.txt", "feature.txt exists", "Bug",
-              ("laya",), "u")
+              ("agent",), "u")
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def parts(tmp_path: Path, target: TargetConfig, origin_repo: Path):  # type: ign
 
 
 def item(stage: Stage, **kw) -> Item:  # type: ignore[no-untyped-def]
-    return replace(Item(5, "fixture", WI.title, "laya/5-add-feature", stage), **kw)
+    return replace(Item(5, "fixture", WI.title, "agent/5-add-feature", stage), **kw)
 
 
 async def test_triage_logs_decisions(parts) -> None:  # type: ignore[no-untyped-def]
@@ -51,7 +51,7 @@ async def test_plan_stores_plan_and_clears_feedback(parts) -> None:  # type: ign
 
 async def test_implement_commits_and_moves_to_verify(parts) -> None:  # type: ignore[no-untyped-def]
     ex, _, ws, *_ = parts
-    ws.create(5, "laya/5-add-feature")
+    ws.create(5, "agent/5-add-feature")
     res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
     assert res.transition.to is Stage.VERIFY
     assert ws.changed_files(ws.worktree_path(5)) == ["feature.txt"]
@@ -60,7 +60,7 @@ async def test_implement_commits_and_moves_to_verify(parts) -> None:  # type: ig
 
 async def test_implement_protected_path_parks(parts) -> None:  # type: ignore[no-untyped-def]
     ex, _, ws, _, runner = parts
-    ws.create(5, "laya/5-add-feature")
+    ws.create(5, "agent/5-add-feature")
 
     def write_infra(role, prompt, cwd):  # type: ignore[no-untyped-def]
         (cwd / "infra").mkdir()
@@ -75,7 +75,7 @@ async def test_implement_protected_path_parks(parts) -> None:  # type: ignore[no
 
 async def test_verify_red_goes_back_to_implement(parts) -> None:  # type: ignore[no-untyped-def]
     ex, _, ws, *_ = parts
-    wt = ws.create(5, "laya/5-add-feature")
+    wt = ws.create(5, "agent/5-add-feature")
     (wt / "broken.txt").write_text("x")
     ws.commit(wt, "feat: broken")
     res = await ex.run(item(Stage.VERIFY))
@@ -85,7 +85,7 @@ async def test_verify_red_goes_back_to_implement(parts) -> None:  # type: ignore
 
 async def test_review_then_pr_open(parts, origin_repo: Path) -> None:  # type: ignore[no-untyped-def]
     ex, ado, ws, *_ = parts
-    wt = ws.create(5, "laya/5-add-feature")
+    wt = ws.create(5, "agent/5-add-feature")
     (wt / "feature.txt").write_text("x")
     ws.commit(wt, "feat: x")
     checks = [{"name": "test", "command": "sh check.sh", "exit_code": 0, "output": "ok",
@@ -95,28 +95,28 @@ async def test_review_then_pr_open(parts, origin_repo: Path) -> None:  # type: i
     res = await ex.run(item(Stage.PR_OPEN, data={"plan": "p", "checks": checks,
                                                  "review_notes": "No blocking issues."}))
     assert res.transition.to is Stage.AWAITING_HUMAN and res.pr_id == 100
-    assert ado.prs[100]["branch"] == "laya/5-add-feature"
+    assert ado.prs[100]["branch"] == "agent/5-add-feature"
     assert ado.wi_comments and "PR !100" in ado.wi_comments[0][1]
 
 
 async def test_pr_open_updates_existing_pr(parts) -> None:  # type: ignore[no-untyped-def]
     ex, ado, ws, *_ = parts
-    wt = ws.create(5, "laya/5-add-feature")
+    wt = ws.create(5, "agent/5-add-feature")
     (wt / "feature.txt").write_text("x")
     ws.commit(wt, "feat: x")
-    pr = ado.create_pr("laya/5-add-feature", "t", "b", 5)
+    pr = ado.create_pr("agent/5-add-feature", "t", "b", 5)
     res = await ex.run(item(Stage.PR_OPEN, pr_id=pr, data={"plan": "p", "checks": []}))
     assert res.pr_id == pr and ado.prs[pr]["updates"] == 1
 
 
 async def test_awaiting_handles_comments(parts) -> None:  # type: ignore[no-untyped-def]
     ex, ado, _, decider, _ = parts
-    pr = ado.create_pr("laya/5-add-feature", "t", "b", 5)
-    ado.pr_threads[pr] = [PrComment(1, 1, "Brian", "/laya rename it"),
+    pr = ado.create_pr("agent/5-add-feature", "t", "b", 5)
+    ado.pr_threads[pr] = [PrComment(1, 1, "Brian", "/agent rename it"),
                           PrComment(2, 1, "Brian", "why this approach?")]
     decider.answers["comment"] = {"comment_intent": "question"}
     res = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))
-    assert res.transition.to is Stage.IMPLEMENT and "/laya rename it" in res.transition.feedback
+    assert res.transition.to is Stage.IMPLEMENT and "/agent rename it" in res.transition.feedback
     assert res.data["seen_comments"] == ["1:1", "2:1"]
     assert [t for _, t, _ in ado.replies] == [2]
     assert [lab.gold for lab in res.labels] == ["change_request"]
@@ -126,7 +126,7 @@ async def test_awaiting_handles_comments(parts) -> None:  # type: ignore[no-unty
 
 async def test_awaiting_completed(parts) -> None:  # type: ignore[no-untyped-def]
     ex, ado, *_ = parts
-    pr = ado.create_pr("laya/5-add-feature", "t", "b", 5)
+    pr = ado.create_pr("agent/5-add-feature", "t", "b", 5)
     ado.prs[pr]["status"] = "completed"
     assert (await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))).transition.to is Stage.DONE
 
@@ -172,7 +172,7 @@ async def test_m6_dry_run_does_not_comment_plan(  # type: ignore[no-untyped-def]
     ex = StageExecutor(target=target, ado=ado, decider=FakeDecider(), runner=FakeRunner(),
                        workspaces=ws, path_policy=PathPolicy(target.policy.protected_paths),
                        decisions_for=lambda _id: [])
-    wt = ws.create(5, "laya/5-add-feature")
+    wt = ws.create(5, "agent/5-add-feature")
     (wt / "feature.txt").write_text("x")
     ws.commit(wt, "feat: x")
     res = await ex.run(item(Stage.PR_OPEN, data={"plan": "p", "checks": []}))

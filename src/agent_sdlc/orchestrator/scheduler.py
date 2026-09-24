@@ -9,14 +9,14 @@ from typing import Protocol
 
 import httpx
 
-from laya_sdlc.adapters.ado import AdoError
-from laya_sdlc.orchestrator.reporting import park_comment_html
-from laya_sdlc.orchestrator.stages import StepResult
-from laya_sdlc.orchestrator.transitions import APPROVAL_LABELS, apply_transition, park, requeue
-from laya_sdlc.ports import AdoPort, WorkspacePort
-from laya_sdlc.store import LabelInput, Store
-from laya_sdlc.targets import TargetConfig
-from laya_sdlc.types import (
+from agent_sdlc.adapters.ado import AdoError
+from agent_sdlc.orchestrator.reporting import park_comment_html
+from agent_sdlc.orchestrator.stages import StepResult
+from agent_sdlc.orchestrator.transitions import APPROVAL_LABELS, apply_transition, park, requeue
+from agent_sdlc.ports import AdoPort, WorkspacePort
+from agent_sdlc.store import LabelInput, Store
+from agent_sdlc.targets import TargetConfig
+from agent_sdlc.types import (
     ACTIVE_STAGES,
     GATE_PARKS,
     AgentInfraError,
@@ -27,7 +27,7 @@ from laya_sdlc.types import (
     Usage,
     UsageLimitError,
 )
-from laya_sdlc.workspaces import GitError, slugify
+from agent_sdlc.workspaces import GitError, slugify
 
 log = logging.getLogger(__name__)
 _INFRA_ERRORS = (httpx.HTTPError, GitError, AdoError, OSError)
@@ -217,7 +217,7 @@ class Scheduler:
         try:
             self._ado.comment_work_item(item.id, park_comment_html(item))
             if item.pr_id:
-                self._ado.comment_pr(item.pr_id, f"laya-sdlc parked this item "
+                self._ado.comment_pr(item.pr_id, f"agent-sdlc parked this item "
                                      f"({item.park_reason}): {item.data.get('park_note', '')}")
         except _INFRA_ERRORS:
             log.exception("park comments failed for #%s", item.id)

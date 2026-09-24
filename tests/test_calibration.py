@@ -1,7 +1,7 @@
 import math
 import random
 
-from laya_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
+from agent_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
 
 
 def test_temperature_one_is_identity() -> None:

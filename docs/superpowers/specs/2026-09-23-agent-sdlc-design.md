@@ -1,4 +1,4 @@
-# Laya SDLC — Multi-Agent Development Loop
+# Agent SDLC — Multi-Agent Development Loop
 
 - **Date:** 2026-09-23
 - **Status:** Draft — awaiting review
@@ -21,11 +21,11 @@ Laya (`nandhakishorm/laya`, a non-autoregressive "System 1" decision engine retu
 | Runtime | Long-running Python orchestrator + Claude Agent SDK, local-first |
 | Orchestration model | Explicit state machine with Laya gates at transitions |
 | Model auth | Claude subscription (`CLAUDE_CODE_OAUTH_TOKEN`) by default; API key optional |
-| Push policy | Standing exception: system pushes only `laya/*` branches and opens PRs to `dev` on the pilot repo, via a dedicated identity |
+| Push policy | Standing exception: system pushes only `agent/*` branches and opens PRs to `dev` on the pilot repo, via a dedicated identity |
 
 ### 1.2 Success criteria (v1)
 
-1. An ADO work item tagged `laya` on the pilot repo progresses unattended from intake to an open PR against `dev`, with plan, test evidence, Laya decisions, and usage in the PR body.
+1. An ADO work item tagged `agent` on the pilot repo progresses unattended from intake to an open PR against `dev`, with plan, test evidence, Laya decisions, and usage in the PR body.
 2. Every park path (unclear item, protected path, red tests past retry budget, review blocking past budget, rate limit, infra error) leaves the item in a clearly explained, resumable state.
 3. PR review comments trigger bounded revision cycles on the same branch.
 4. No agent can write protected paths, run disallowed commands, read secrets, or push. This is enforced in code and covered by tests.
@@ -41,7 +41,7 @@ Self-generated work (from logs/TODOs/roadmap), auto-merge, hosting the orchestra
 - Stack: Turborepo TypeScript monorepo — `apps/rallysource-api` (NestJS, Prisma, Postgres), `apps/rallysource-web` and `apps/rallysource-teams` (React/Vite), `apps/ado-agent`, `packages/*`. npm workspaces (`npm@11.1.0`).
 - CI/CD: Azure Pipelines build Docker images and deploy **on push** to `dev`/`qa`/`main`/`prod`. No PR validation pipeline observed. A merge to `dev` therefore deploys to the dev environment.
 - Checks available: only `rallysource-api` has tests (`jest`, plus `test:e2e`, which needs a database and is excluded). `rallysource-web` and `rallysource-teams` have `type-check` (`tsc --noEmit`) and no tests. The API's `lint` script runs `eslint --fix` (it mutates files), so verify runs lint via `turbo run lint` and treats any resulting working-tree change as part of the diff.
-- **The system never touches the local checkout at `~/Development/rallysource/repos/RallySource/`.** It maintains its own clone under `~/Development/paradigm/laya/workspaces/`.
+- **The system never touches the local checkout at `~/Development/rallysource/repos/RallySource/`.** It maintains its own clone under `~/Development/paradigm/agent-sdlc/workspaces/`.
 
 ## 3. Architecture
 
@@ -60,21 +60,21 @@ ADO Boards ──poll──▶ Intake adapter
               Workspace manager (clone + git worktree per item)
 ```
 
-Python ≥ 3.10 (required by Laya). Package: `laya_sdlc`.
+Python ≥ 3.10 (required by Laya). Package: `agent_sdlc`.
 
 ### 3.1 Components
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `laya_sdlc.decisions` | Wraps `laya.Router`. Registry of typed questions per gate; applies per-gate temperatures and thresholds; returns a `Decision` (answer, calibrated probs, confidence, `shadow` flag); logs every call. The only module importing `laya`. | laya, store |
-| `laya_sdlc.orchestrator` | State machine. Transitions are pure functions `(ItemState, StageResult \| Decision) -> Transition`. Scheduler loop picks runnable items within concurrency/budget limits. Sole writer of item state. | all below |
-| `laya_sdlc.agents` | Role definitions (system prompt, allowed tools, allowed paths, turn/token budget) and a runner that executes a role via the Claude Agent SDK in an isolated config dir. | claude-agent-sdk, policy |
-| `laya_sdlc.policy` | Path policy (protected globs, allowlists) and command policy (allowlisted commands). Used by agent tool hooks and by the pre-push diff check. | — |
-| `laya_sdlc.workspaces` | Maintains one bare/base clone per target; creates/removes `laya/<item-id>-<slug>` worktrees; runs target commands with timeouts; captures output. | git |
-| `laya_sdlc.adapters.ado` | ADO REST: query/tag/comment work items, push branch (only adapter may push), create/update PR, read PR threads and status. | httpx, PAT |
-| `laya_sdlc.store` | Persistence: items, stage attempts, decisions, labels, usage, control flags. SQLAlchemy; SQLite locally, Postgres optional. | SQLAlchemy |
-| `laya_sdlc.targets` | Loads and validates `targets/<name>.yaml` (Pydantic v2). | pydantic |
-| `laya_sdlc.cli` | `run`, `pause`, `resume`, `status`, `requeue`, `label`, `calibrate`. | all |
+| `agent_sdlc.decisions` | Wraps `laya.Router`. Registry of typed questions per gate; applies per-gate temperatures and thresholds; returns a `Decision` (answer, calibrated probs, confidence, `shadow` flag); logs every call. The only module importing `laya`. | laya, store |
+| `agent_sdlc.orchestrator` | State machine. Transitions are pure functions `(ItemState, StageResult \| Decision) -> Transition`. Scheduler loop picks runnable items within concurrency/budget limits. Sole writer of item state. | all below |
+| `agent_sdlc.agents` | Role definitions (system prompt, allowed tools, allowed paths, turn/token budget) and a runner that executes a role via the Claude Agent SDK in an isolated config dir. | claude-agent-sdk, policy |
+| `agent_sdlc.policy` | Path policy (protected globs, allowlists) and command policy (allowlisted commands). Used by agent tool hooks and by the pre-push diff check. | — |
+| `agent_sdlc.workspaces` | Maintains one bare/base clone per target; creates/removes `agent/<item-id>-<slug>` worktrees; runs target commands with timeouts; captures output. | git |
+| `agent_sdlc.adapters.ado` | ADO REST: query/tag/comment work items, push branch (only adapter may push), create/update PR, read PR threads and status. | httpx, PAT |
+| `agent_sdlc.store` | Persistence: items, stage attempts, decisions, labels, usage, control flags. SQLAlchemy; SQLite locally, Postgres optional. | SQLAlchemy |
+| `agent_sdlc.targets` | Loads and validates `targets/<name>.yaml` (Pydantic v2). | pydantic |
+| `agent_sdlc.cli` | `run`, `pause`, `resume`, `status`, `requeue`, `label`, `calibrate`. | all |
 
 Interfaces between orchestrator and `decisions`, `agents`, `workspaces`, `adapters.ado` are Python protocols so each can be replaced with a fake in tests.
 
@@ -84,14 +84,14 @@ States: `triage → plan → implement → verify → review → pr_open → awa
 
 | Stage | Worker | Exit decision | Transitions |
 |---|---|---|---|
-| intake | ADO adapter polls items tagged `laya` in configured area path, not yet tracked | — | → triage |
+| intake | ADO adapter polls items tagged `agent` in configured area path, not yet tracked | — | → triage |
 | triage | Laya only | `kind` (choice: bug/feature/chore/question), `clarity` (score: unclear/partly clear/clear), `touches_protected` (noul), `size` (choice: small/medium/large) | kind=question, clarity<clear, touches_protected≠no, or size=large → `parked:needs_human` with an ADO comment explaining what's needed. Else → plan |
 | plan | Planner agent, read-only tools | `plan_addresses_item` (noul), `plan_scope_ok` (noul) | Both yes → implement. Otherwise one replan with the decision as feedback, then `parked:plan_rejected` |
 | implement | Implementer agent, write tools limited by path policy, TDD instructions | Hard checks: path policy, diff size ≤ `max_diff_lines` | Violation → `parked:policy`. Else → verify |
 | verify | Workspace runs target `test`, `lint`, `typecheck`, `build` commands | Exit codes | All green → review. Red → implement with failure output (attempt+1). Attempts > `max_verify_retries` → `parked:red` |
 | review | Reviewer agent, fresh context, read-only; sees item, plan, diff, verify output | `review_blocking` (noul), `risk` (score: low/medium/high, advisory) | Blocking=no → pr_open. Blocking=yes → implement with review notes (counts toward retry budget). Uncertain/shadow → pr_open, with the concern flagged in the PR body |
-| pr_open | ADO adapter: pre-push policy re-check, push `laya/*`, open PR to target base branch | — | → awaiting_human |
-| awaiting_human | Poll PR status and new comment threads | Per new comment: `comment_intent` (choice: change_request/question/approval/noise) | Merged → done. Abandoned → closed. change_request → implement (round+1; rounds > `max_pr_rounds` → `parked:pr_rounds`, keeping the triggering change request as the item's feedback). question → reply comment only; no code changes. A comment starting with `/laya` is always a change request, regardless of `comment_intent`. An uncertain comment (low confidence or shadow) gets a reply asking the human to prefix with `/laya` to request a change |
+| pr_open | ADO adapter: pre-push policy re-check, push `agent/*`, open PR to target base branch | — | → awaiting_human |
+| awaiting_human | Poll PR status and new comment threads | Per new comment: `comment_intent` (choice: change_request/question/approval/noise) | Merged → done. Abandoned → closed. change_request → implement (round+1; rounds > `max_pr_rounds` → `parked:pr_rounds`, keeping the triggering change request as the item's feedback). question → reply comment only; no code changes. A comment starting with `/agent` is always a change request, regardless of `comment_intent`. An uncertain comment (low confidence or shadow) gets a reply asking the human to prefix with `/agent` to request a change |
 
 Rules:
 - **Uncertainty routes to humans.** A `noul` question whose P(true) falls inside the `(1 − threshold, threshold)` band is reported as `unknown`; that, a confidence below the gate threshold, or a gate still in shadow mode all resolve to the human-routing branch. `touches_protected` (triage) passes triage only when its answer is `no`.
@@ -99,7 +99,7 @@ Rules:
 - **All loops are bounded.** Replans (1), verify/review retries (`max_verify_retries`, default 3), PR rounds (`max_pr_rounds`, default 3).
 - **Agent error results are failed attempts** (final review I2). If a planner, implementer or reviewer session ends with an error result (e.g. `error_max_turns`, `error_during_execution`) that is not a usage limit, no gate decision is taken: the stage is retried with attempt+1, and once attempt ≥ `max_verify_retries` the item goes to `parked:agent_error` ("agent did not finish: <subtype>"). `agent_error` is not a gate park: removing the tag retries the same stage with fresh counters and records no approval labels. The session's usage is still recorded.
 - **A confident review clears a stale note** (M1): moving to `pr_open` without a reviewer-concern note removes any note left by an earlier uncertain review.
-- **Parking always comments** on the ADO work item (and PR, if open) with what happened, what was tried, and what a human should do; the comment states the actual effect of removing the tag (ruling R13). It also adds tag `laya:parked`. A park of the `plan` gate includes the plan (escaped, truncated to ~6000 chars) and a park of the `review` gate includes the review notes, so the human can judge what they are approving (I3). **Park side-effect order (final review C1):** the tag is set first and `parked_tag_set` is recorded only after that succeeds; comments follow. A parked item without `parked_tag_set` is never treated as untagged-by-a-human — its park side effects are retried on later ticks instead. Only after the tag was confirmed set does a missing tag mean approval. Removing the tag or running `laya-sdlc requeue <id>` re-queues it: for a gate park (`needs_human`/`plan_rejected`) taken at the `triage`, `plan`, or `review` gate, this **approves proceeding past that gate** and records approval labels for it. For any other park — including a gate-reason park taken outside those three stages — it **resumes the parked stage with fresh counters** (attempt, replans, infra failures reset; PR rounds reset only for a `pr_rounds` park). Exception (I5): a `pr_rounds` park re-queues to `implement` with the kept change request as feedback and PR rounds reset to 0.
+- **Parking always comments** on the ADO work item (and PR, if open) with what happened, what was tried, and what a human should do; the comment states the actual effect of removing the tag (ruling R13). It also adds tag `agent:parked`. A park of the `plan` gate includes the plan (escaped, truncated to ~6000 chars) and a park of the `review` gate includes the review notes, so the human can judge what they are approving (I3). **Park side-effect order (final review C1):** the tag is set first and `parked_tag_set` is recorded only after that succeeds; comments follow. A parked item without `parked_tag_set` is never treated as untagged-by-a-human — its park side effects are retried on later ticks instead. Only after the tag was confirmed set does a missing tag mean approval. Removing the tag or running `agent-sdlc requeue <id>` re-queues it: for a gate park (`needs_human`/`plan_rejected`) taken at the `triage`, `plan`, or `review` gate, this **approves proceeding past that gate** and records approval labels for it. For any other park — including a gate-reason park taken outside those three stages — it **resumes the parked stage with fresh counters** (attempt, replans, infra failures reset; PR rounds reset only for a `pr_rounds` park). Exception (I5): a `pr_rounds` park re-queues to `implement` with the kept change request as feedback and PR rounds reset to 0.
 
 ### 4.1 PR body contents
 
@@ -111,12 +111,12 @@ Linked work item; plan; files changed summary; verify command results; reviewer 
 - Question types used: `choice`, `score`, `noul` as defined by Laya.
 - Per gate and target we store: temperature(s) per (question type, option count), a confidence threshold, and mode `shadow | active`. These calibrations live in the state DB (`calibrations` table), not in the target YAML.
 - **Shadow by default.** The Laya README states the shipped checkpoints are over-confident (mean ECE 0.466 for `laya`; `laya-multilingual` ships without fitted temperatures). A gate runs in shadow until it has fitted temperatures and its held-out ECE ≤ `max_ece` (default 0.10). In shadow, the answer is logged but the transition takes the human-routing branch.
-- **Labels.** `laya-sdlc label <gate>` presents examples for Brian to label. Bootstrap sources: closed ADO work items (triage gates), historical PRs and comment threads (review/comment gates). Human outcomes during operation are recorded as labels automatically. Examples: clarification given on a parked item means clarity was not `clear`. Merge versus abandon labels the plan and review gates — a merged PR (stage → `done`) adds `plan_addresses_item=true`, `plan_scope_ok=true`, and `review_blocking=false` approval labels, sourced from that item's latest logged decisions for those gates.
-- **Fit.** `laya-sdlc calibrate [<gate>]` fits temperature scaling on a held-out split, reports ECE/accuracy, and promotes the gate to `active` only on explicit confirmation.
+- **Labels.** `agent-sdlc label <gate>` presents examples for Brian to label. Bootstrap sources: closed ADO work items (triage gates), historical PRs and comment threads (review/comment gates). Human outcomes during operation are recorded as labels automatically. Examples: clarification given on a parked item means clarity was not `clear`. Merge versus abandon labels the plan and review gates — a merged PR (stage → `done`) adds `plan_addresses_item=true`, `plan_scope_ok=true`, and `review_blocking=false` approval labels, sourced from that item's latest logged decisions for those gates.
+- **Fit.** `agent-sdlc calibrate [<gate>]` fits temperature scaling on a held-out split, reports ECE/accuracy, and promotes the gate to `active` only on explicit confirmation.
 
 ## 6. Agents
 
-Roles are defined in `laya_sdlc/agents/roles/` (prompt + config):
+Roles are defined in `agent_sdlc/agents/roles/` (prompt + config):
 
 | Role | Tools | Paths | Output |
 |---|---|---|---|
@@ -125,7 +125,7 @@ Roles are defined in `laya_sdlc/agents/roles/` (prompt + config):
 | reviewer | Read, Glob, Grep, read-only Bash | read: repo | Review notes (blocking issues vs nits) |
 
 Runner requirements:
-- **Isolated Claude config.** Each session runs with `CLAUDE_CONFIG_DIR` pointing to `~/.laya-sdlc/claude-config/`, `settingSources` empty, `strictMcpConfig`, auto memory disabled, claude.ai connectors disabled. Agents never load Brian's personal `~/.claude` settings, memory, or connectors.
+- **Isolated Claude config.** Each session runs with `CLAUDE_CONFIG_DIR` pointing to `~/.agent-sdlc/claude-config/`, `settingSources` empty, `strictMcpConfig`, auto memory disabled, claude.ai connectors disabled. Agents never load Brian's personal `~/.claude` settings, memory, or connectors.
 - **Tool enforcement via SDK hooks / permission callback.** Every Write/Edit path is checked against the path policy. Every Bash command is checked against the command policy. Violations are denied and recorded.
 - `cwd` is the item's worktree. Agents cannot reach other worktrees or the base clone. Glob patterns that are absolute, start with `~`, or contain `..` are path-checked like `path` (M3).
 - **SDK Bash sandbox (final review C2).** Sessions pass `ClaudeAgentOptions.sandbox` = `{enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false, excludedCommands: [], network: {allowedDomains: [], allowUnixSockets: [], allowAllUnixSockets: false, allowLocalBinding: false}}`: no `dangerouslyDisableSandbox` escape hatch, no network for Bash, no Unix sockets (e.g. an ssh-agent).
@@ -160,11 +160,11 @@ Runner requirements:
 - **Command policy:** allowlist only: target commands from config; `git status|diff|log|show`; `ls`, `cat`, `grep`, `rg`, `find`, `head`, `tail`, `wc`, `pwd`, `tree` (read-only, ruling R7). Denied forms of those: `find -exec/-execdir/-ok/-okdir/-delete/-fprint/-fprint0/-fprintf/-fls`, `rg --pre`/`--pre-glob` (any form incl. `--pre=`), `tree -o`/`-R`/`--fromfile` (also inside clustered short flags such as `-aR`), `git --output`. Denied: `git push|commit|remote|config`, package installs outside the target install command, `prisma migrate|db`, `az`, `docker`, `kubectl`, `curl`, `wget`, `ssh`. The workspace manager (not agents) creates commits. The ADO adapter (not agents) pushes.
 - **Bash is confined to the worktree** (rulings R10/R12): every non-flag argument in an allowlisted Bash command (except the executable itself, argv[0]) and every value of a `--flag=value` argument must resolve — following symlinks — inside the item's worktree, or the call is denied as "path is outside the worktree". A `~`-prefixed path is always denied, without resolving it.
 - **Fail-closed policy hook:** any exception raised while evaluating tool policy (a malformed path, a symlink loop, an unparseable command, etc.) is treated as a denial, not a pass-through.
-- **Push scope:** the adapter refuses any ref not matching `refs/heads/laya/*`. The ADO identity has no push rights to `dev`/`qa`/`main`/`prod` (branch policy set up by Brian, §9).
-- **`--dry-run-push` (ruling R9):** makes `push_branch`, `create_pr`/`update_pr`, `comment_pr`/`reply_pr`, and `delete_branch` no-ops; a dry-run PR polls with id `0` and status `active` with no comments. Work-item comments and tags (parking, `laya:parked`) stay real — except the "plan for PR !N" comment, which is skipped for the dry-run PR id `0` (M6) — so the park/approve loop still works end to end without ever touching the real PR or pushing a branch.
+- **Push scope:** the adapter refuses any ref not matching `refs/heads/agent/*`. The ADO identity has no push rights to `dev`/`qa`/`main`/`prod` (branch policy set up by Brian, §9).
+- **`--dry-run-push` (ruling R9):** makes `push_branch`, `create_pr`/`update_pr`, `comment_pr`/`reply_pr`, and `delete_branch` no-ops; a dry-run PR polls with id `0` and status `active` with no comments. Work-item comments and tags (parking, `agent:parked`) stay real — except the "plan for PR !N" comment, which is skipped for the dry-run PR id `0` (M6) — so the park/approve loop still works end to end without ever touching the real PR or pushing a branch.
 - **Secrets:** worktrees never contain the repo's `.env`. Tests use an optional target-provided `env_template` with non-secret values. PAT and model credentials are never exposed to agents. Orchestrator git calls (fetch, clone, worktree, commit, push) run with `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` so the user's credential helpers and `url.*.insteadOf` rewrites are never used; auth is only the per-command `http.extraheader`. Verify/install commands and git get the scratch `HOME` and the safe-env allowlist (no `SSH_AUTH_SOCK`, no cloud or token variables).
-- **Kill switch:** `laya-sdlc pause` sets a DB flag. The scheduler stops dispatching and in-flight agent sessions are interrupted at the next turn. `resume` clears it.
-- **Branch hygiene:** worktrees are removed when an item reaches done/closed. The remote `laya/*` branch is deleted by the adapter after the PR closes.
+- **Kill switch:** `agent-sdlc pause` sets a DB flag. The scheduler stops dispatching and in-flight agent sessions are interrupted at the next turn. `resume` clears it.
+- **Branch hygiene:** worktrees are removed when an item reaches done/closed. The remote `agent/*` branch is deleted by the adapter after the PR closes.
 
 ## 8. Target configuration
 
@@ -176,9 +176,9 @@ ado:
   org: MilesThurman
   project: CodvoMigration
   repo: RallySource
-  intake_tag: laya
+  intake_tag: agent
   base_branch: dev
-  branch_prefix: laya/
+  branch_prefix: agent/
 repo:
   # clone_url is derived, not configured: https://dev.azure.com/<org>/<project>/_git/<repo>,
   # pushed with a per-command `http.extraheader` carrying the PAT (never written to git config).
@@ -207,13 +207,13 @@ laya:
   model: auto
   max_ece: 0.10
   # gate temperatures/thresholds/mode are not in this file — they live in the state DB's
-  # `calibrations` table, written by `laya-sdlc calibrate` (see §5).
+  # `calibrations` table, written by `agent-sdlc calibrate` (see §5).
 ```
 
 ## 9. Setup Brian performs (not automated)
 
 1. Create a dedicated ADO identity or PAT scoped to: Work Items (read/write), Code (read/write), Pull Requests (read/write). Store in keychain.
-2. ADO branch policies on `dev`, `qa`, `main`, `prod`: deny direct push for the laya identity; require PR with Brian as required reviewer.
+2. ADO branch policies on `dev`, `qa`, `main`, `prod`: deny direct push for the agent-sdlc identity; require PR with Brian as required reviewer.
 3. Generate `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`; store in keychain.
 4. Confirm that `npm run test --workspace=apps/rallysource-api` passes on `dev` without a database or `.env`. If not, provide a non-secret `env_template` or a narrower test command.
 

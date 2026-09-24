@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from laya_sdlc.types import (
+from agent_sdlc.types import (
     GATE_PARKS,
     CommandResult,
     Decision,
@@ -111,7 +111,7 @@ class CommentOutcome:
 
 
 def classify_comment(c: PrComment, ds: dict[str, Decision] | None) -> str:
-    if c.content.strip().lower().startswith("/laya"):
+    if c.content.strip().lower().startswith("/agent"):
         return "change_request"
     if ds is None:
         return "uncertain"

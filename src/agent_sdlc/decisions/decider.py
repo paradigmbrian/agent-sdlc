@@ -3,9 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Protocol
 
-from laya_sdlc.decisions.calibration import apply_temperature
-from laya_sdlc.decisions.gates import GATES, option_keys
-from laya_sdlc.types import Calibration, Decision
+from agent_sdlc.decisions.calibration import apply_temperature
+from agent_sdlc.decisions.gates import GATES, option_keys
+from agent_sdlc.types import Calibration, Decision
 
 _DIST_KEYS = ("probabilities", "distribution", "probs")
 

@@ -1,6 +1,6 @@
 import pytest
 
-from laya_sdlc.decisions.decider import Decider, LayaPredictor
+from agent_sdlc.decisions.decider import Decider, LayaPredictor
 
 
 @pytest.mark.slow

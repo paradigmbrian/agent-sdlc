@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from laya_sdlc.agents.roles import (
+from agent_sdlc.agents.roles import (
     IMPLEMENTER,
     PLANNER,
     REVIEWER,
@@ -12,8 +12,8 @@ from laya_sdlc.agents.roles import (
     planner_prompt,
     reviewer_prompt,
 )
-from laya_sdlc.decisions.gates import triage_state, work_item_text
-from laya_sdlc.orchestrator.reporting import (
+from agent_sdlc.decisions.gates import triage_state, work_item_text
+from agent_sdlc.orchestrator.reporting import (
     QUESTION_REPLY,
     UNCERTAIN_REPLY,
     commit_message,
@@ -21,7 +21,7 @@ from laya_sdlc.orchestrator.reporting import (
     pr_body,
     pr_title,
 )
-from laya_sdlc.orchestrator.transitions import (
+from agent_sdlc.orchestrator.transitions import (
     CommentOutcome,
     Transition,
     after_agent_error,
@@ -34,11 +34,11 @@ from laya_sdlc.orchestrator.transitions import (
     classify_comment,
     park,
 )
-from laya_sdlc.policy import PathPolicy
-from laya_sdlc.ports import AdoPort, AgentRunner, DeciderPort, WorkspacePort
-from laya_sdlc.store import LabelInput
-from laya_sdlc.targets import TargetConfig
-from laya_sdlc.types import AgentResult, CommandResult, Decision, Item, ParkReason, Stage, Usage
+from agent_sdlc.policy import PathPolicy
+from agent_sdlc.ports import AdoPort, AgentRunner, DeciderPort, WorkspacePort
+from agent_sdlc.store import LabelInput
+from agent_sdlc.targets import TargetConfig
+from agent_sdlc.types import AgentResult, CommandResult, Decision, Item, ParkReason, Stage, Usage
 
 
 @dataclass
@@ -200,7 +200,7 @@ class StageExecutor:
             ds = self._decider.decide("comment", state)
             logged += _logged(ds, state)
             intent = classify_comment(c, ds)
-            if c.content.strip().lower().startswith("/laya"):
+            if c.content.strip().lower().startswith("/agent"):
                 d = ds["comment_intent"]
                 labels.append(LabelInput("comment", "comment_intent", d.raw_probs,
                                          "change_request", "slash_command"))

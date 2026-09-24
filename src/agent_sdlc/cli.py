@@ -8,22 +8,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from laya_sdlc.decisions.gates import GATES
-from laya_sdlc.labeling import calibrate_question, label_logged, label_triage
-from laya_sdlc.orchestrator.transitions import requeue
-from laya_sdlc.store import Store
-from laya_sdlc.targets import TargetConfig, load_target
+from agent_sdlc.decisions.gates import GATES
+from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
+from agent_sdlc.orchestrator.transitions import requeue
+from agent_sdlc.store import Store
+from agent_sdlc.targets import TargetConfig, load_target
 
-_DEFAULT_DB = f"sqlite:///{Path('~/.laya-sdlc/state.db').expanduser()}"
+_DEFAULT_DB = f"sqlite:///{Path('~/.agent-sdlc/state.db').expanduser()}"
 # Defaults resolve from the project root, not the CWD (M12).
 _ROOT = Path(__file__).resolve().parents[2]
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="laya-sdlc")
+    p = argparse.ArgumentParser(prog="agent-sdlc")
     p.add_argument("--target", default=os.environ.get(
-        "LAYA_SDLC_TARGET", str(_ROOT / "targets" / "rallysource.yaml")))
-    p.add_argument("--db", default=os.environ.get("LAYA_SDLC_DB", _DEFAULT_DB))
+        "AGENT_SDLC_TARGET", str(_ROOT / "targets" / "rallysource.yaml")))
+    p.add_argument("--db", default=os.environ.get("AGENT_SDLC_DB", _DEFAULT_DB))
     p.add_argument("--workspaces", default=str(_ROOT / "workspaces"))
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")
@@ -53,20 +53,20 @@ def _store(url: str) -> Store:
 
 def _runtime(target: TargetConfig, store: Store, workspaces: Path,
              dry_run_push: bool) -> tuple[Any, Any, Any]:
-    from laya_sdlc.adapters.ado import AdoClient
-    from laya_sdlc.agents.runner import ClaudeAgentRunner
-    from laya_sdlc.decisions.decider import Decider, LayaPredictor
-    from laya_sdlc.orchestrator.scheduler import Scheduler
-    from laya_sdlc.orchestrator.stages import StageExecutor
-    from laya_sdlc.policy import CommandPolicy, PathPolicy
-    from laya_sdlc.secrets import (
+    from agent_sdlc.adapters.ado import AdoClient
+    from agent_sdlc.agents.runner import ClaudeAgentRunner
+    from agent_sdlc.decisions.decider import Decider, LayaPredictor
+    from agent_sdlc.orchestrator.scheduler import Scheduler
+    from agent_sdlc.orchestrator.stages import StageExecutor
+    from agent_sdlc.policy import CommandPolicy, PathPolicy
+    from agent_sdlc.secrets import (
         ADO_PAT,
         ANTHROPIC_KEY,
         CLAUDE_TOKEN,
         basic_auth_header,
         get_secret,
     )
-    from laya_sdlc.workspaces import Workspaces
+    from agent_sdlc.workspaces import Workspaces
 
     pat = get_secret(*ADO_PAT)
     if target.auth.mode == "subscription":
@@ -77,7 +77,7 @@ def _runtime(target: TargetConfig, store: Store, workspaces: Path,
     ws = Workspaces(workspaces.resolve(), target, git_auth_header=basic_auth_header(pat))
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([target.repo.install, *target.repo.commands.values()])
-    runner = ClaudeAgentRunner(pp, cp, Path("~/.laya-sdlc/claude-config").expanduser(), auth_env,
+    runner = ClaudeAgentRunner(pp, cp, Path("~/.agent-sdlc/claude-config").expanduser(), auth_env,
                                should_stop=lambda: store.get_flag("paused") == "1", home=ws.home)
     decider = Decider(LayaPredictor(target.laya.model), store.calibration,
                       target.laya.default_threshold)

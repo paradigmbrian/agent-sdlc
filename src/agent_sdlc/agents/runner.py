@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from laya_sdlc.agents.roles import Role
-from laya_sdlc.policy import CommandPolicy, PathPolicy
-from laya_sdlc.types import AgentInfraError, AgentInterrupted, AgentResult, Usage, UsageLimitError
+from agent_sdlc.agents.roles import Role
+from agent_sdlc.policy import CommandPolicy, PathPolicy
+from agent_sdlc.types import AgentInfraError, AgentInterrupted, AgentResult, Usage, UsageLimitError
 
 _WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # Narrow on purpose (I2): only the provider's own usage/rate-limit wording or an HTTP 429 status,
@@ -168,7 +168,7 @@ class ClaudeAgentRunner:
             denied.append(f"{data.get('tool_name')}: {reason}")
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                "permissionDecisionReason": f"Blocked by laya-sdlc policy: {reason}"}}
+                "permissionDecisionReason": f"Blocked by agent-sdlc policy: {reason}"}}
 
         options = ClaudeAgentOptions(
             system_prompt=role.system_prompt,

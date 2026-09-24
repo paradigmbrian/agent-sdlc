@@ -4,11 +4,11 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from laya_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
-from laya_sdlc.decisions.gates import GATES, option_keys, triage_state, work_item_text
-from laya_sdlc.ports import AdoPort, DeciderPort
-from laya_sdlc.store import LabelInput, Store
-from laya_sdlc.types import Calibration
+from agent_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
+from agent_sdlc.decisions.gates import GATES, option_keys, triage_state, work_item_text
+from agent_sdlc.ports import AdoPort, DeciderPort
+from agent_sdlc.store import LabelInput, Store
+from agent_sdlc.types import Calibration
 
 MIN_LABELS = 30
 

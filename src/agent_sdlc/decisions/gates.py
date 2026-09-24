@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from laya_sdlc.types import WorkItem
+from agent_sdlc.types import WorkItem
 
 GATES: dict[str, dict[str, dict[str, Any]]] = {
     "triage": {

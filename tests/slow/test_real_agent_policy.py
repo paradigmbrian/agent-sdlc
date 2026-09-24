@@ -3,10 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from laya_sdlc.agents.roles import IMPLEMENTER
-from laya_sdlc.agents.runner import ClaudeAgentRunner
-from laya_sdlc.policy import CommandPolicy, PathPolicy
-from laya_sdlc.secrets import CLAUDE_TOKEN, get_secret
+from agent_sdlc.agents.roles import IMPLEMENTER
+from agent_sdlc.agents.runner import ClaudeAgentRunner
+from agent_sdlc.policy import CommandPolicy, PathPolicy
+from agent_sdlc.secrets import CLAUDE_TOKEN, get_secret
 
 
 @pytest.mark.slow

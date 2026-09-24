@@ -8,6 +8,51 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "agent-sdlc"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "claude-agent-sdk" },
+    { name = "httpx" },
+    { name = "keyring" },
+    { name = "laya" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "sqlalchemy" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "respx" },
+    { name = "ruff" },
+    { name = "types-pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "claude-agent-sdk", specifier = ">=0.2.158" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "keyring", specifier = ">=25.7.0" },
+    { name = "laya", specifier = ">=0.3.11" },
+    { name = "pydantic", specifier = ">=2.13.5" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "sqlalchemy", specifier = ">=2.0.54" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=2.3.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "respx", specifier = ">=0.23.1" },
+    { name = "ruff", specifier = ">=0.16.8" },
+    { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },
+]
+
+[[package]]
 name = "annotated-doc"
 version = "0.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -702,51 +747,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/69/04/0abe8a5986500e9385f43d795a62910dab63628390250c73fea5e1e98822/laya-0.3.11.tar.gz", hash = "sha256:f484efeb339a39f68fe44c650947aa90238bfb84d9ec5450b157b51fb2fa0794", size = 238537, upload-time = "2026-09-23T18:06:50.05Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6d/57/1090909277c07555fd75a8e9c2fcd4d1952372cfbff2a01b081450a63f21/laya-0.3.11-py3-none-any.whl", hash = "sha256:1ee717dd05a742135869383af9b66b20d5c5f62e62d9e57e3fcf84203ea1e443", size = 106531, upload-time = "2026-09-23T18:06:48.166Z" },
-]
-
-[[package]]
-name = "laya-sdlc"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "claude-agent-sdk" },
-    { name = "httpx" },
-    { name = "keyring" },
-    { name = "laya" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "sqlalchemy" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "respx" },
-    { name = "ruff" },
-    { name = "types-pyyaml" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "claude-agent-sdk", specifier = ">=0.2.158" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "keyring", specifier = ">=25.7.0" },
-    { name = "laya", specifier = ">=0.3.11" },
-    { name = "pydantic", specifier = ">=2.13.5" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "sqlalchemy", specifier = ">=2.0.54" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "mypy", specifier = ">=2.3.1" },
-    { name = "pytest", specifier = ">=9.1.1" },
-    { name = "pytest-asyncio", specifier = ">=1.4.0" },
-    { name = "respx", specifier = ">=0.23.1" },
-    { name = "ruff", specifier = ">=0.16.8" },
-    { name = "types-pyyaml", specifier = ">=6.0.12.20260906" },
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 import random
 
-from laya_sdlc.labeling import MIN_LABELS, calibrate_question, label_logged, label_triage
-from laya_sdlc.store import LabelInput, Store
-from laya_sdlc.types import WorkItem
+from agent_sdlc.labeling import MIN_LABELS, calibrate_question, label_logged, label_triage
+from agent_sdlc.store import LabelInput, Store
+from agent_sdlc.types import WorkItem
 from tests.fakes import FakeAdo, FakeDecider
 
 
@@ -49,7 +49,7 @@ def test_label_triage_records_answers() -> None:
 def test_label_logged_marks_decisions() -> None:
     from datetime import date
 
-    from laya_sdlc.types import Usage
+    from agent_sdlc.types import Usage
     from tests.fakes import decision
     store = Store("sqlite://")
     store.add_item("t", WorkItem(1, "t", "d", "a", "Bug", (), "u"), "b")
