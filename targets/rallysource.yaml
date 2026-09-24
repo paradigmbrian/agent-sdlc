@@ -41,6 +41,11 @@ policy:
     - ".npmrc"
     - "**/.npmrc"
     - "**/nest-cli.json"
+    # rc-style and .config/ tooling config (.prettierrc, .babelrc, .eslintrc.json, ...).
+    - "**/.*rc"
+    - "**/.*rc.*"
+    - "**/.config/**"
+    - "**/prettier.config.*"
   manifest_paths:
     - "**/package.json"
     - "package-lock.json"

@@ -80,8 +80,10 @@ marks items with no event for `limits.stale_after_minutes` as `STALE`.
   different change parks again.
 - `budget` mid-session: the agent was stopped when the item's token budget ran out.
 
-Tooling config that verify executes (eslint/vite/postcss/tailwind config, `turbo.json`,
-`.npmrc`, `nest-cli.json`, `packages/eslint-config/**`, tsconfig files) is protected.
+Tooling config that verify executes (eslint/vite/postcss/tailwind/prettier config, `turbo.json`,
+`.npmrc`, rc-style files such as `.prettierrc`, `.babelrc` and `.eslintrc.json`, `.config/**`,
+`nest-cli.json`, `packages/eslint-config/**`, tsconfig files) is protected. Implementer writes to
+gitignored paths (`node_modules/`, `dist/`) are denied and escalate.
 Agent-written source and test code still runs on the host during verify. Container isolation is
 a separate follow-up and must be in place before unattended runs.
 
