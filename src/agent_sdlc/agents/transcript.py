@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
+from agent_sdlc.fsutil import ensure_private_dir
 from agent_sdlc.types import Denial
 
 log = logging.getLogger(__name__)
@@ -29,7 +30,7 @@ class TranscriptWriter:
         if path is None:
             return
         try:
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(path.parent)
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self._f = os.fdopen(fd, "a", encoding="utf-8")
             self.path = str(path)

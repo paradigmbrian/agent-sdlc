@@ -8,6 +8,8 @@ from contextvars import ContextVar
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+from agent_sdlc.fsutil import ensure_private_dir
+
 FORMAT = "%(asctime)s %(levelname)s [#%(item)s %(stage)s] %(name)s: %(message)s"
 _item: ContextVar[str] = ContextVar("agent_sdlc_item", default="-")
 _stage: ContextVar[str] = ContextVar("agent_sdlc_stage", default="-")
@@ -45,7 +47,7 @@ def configure_logging(log_dir: Path | None) -> None:
     handlers.append(console)
     if log_dir is not None:
         try:
-            log_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            ensure_private_dir(log_dir)
             fh = TimedRotatingFileHandler(log_dir / "agent-sdlc.log", when="midnight",
                                           backupCount=14, encoding="utf-8")
             fh.setLevel(logging.DEBUG)

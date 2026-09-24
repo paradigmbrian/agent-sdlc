@@ -42,6 +42,7 @@ def test_writer_records_session(tmp_path: Path) -> None:
     assert w.path == str(path) and w.error is None
     assert oct(path.stat().st_mode & 0o777) == "0o600"
     assert oct(path.parent.stat().st_mode & 0o777) == "0o700"
+    assert oct((tmp_path / "traces").stat().st_mode & 0o777) == "0o700"
 
 
 def test_writer_without_path_is_noop() -> None:
