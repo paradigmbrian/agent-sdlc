@@ -35,6 +35,8 @@ policy:
     - "apps/*/*.config.*"
     - "packages/*/*.config.*"
     - "packages/eslint-config/**"
+    - "**/tsconfig*.json"
+    - "packages/tsconfig/**"
     - "turbo.json"
     - ".npmrc"
     - "**/.npmrc"

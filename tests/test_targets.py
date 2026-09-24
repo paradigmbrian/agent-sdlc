@@ -67,10 +67,13 @@ def test_rallysource_protects_tooling_config_but_not_app_config() -> None:
               "apps/rallysource-teams/tailwind.config.ts", "apps/rallysource-web/postcss.config.js",
               "apps/rallysource-api/eslint.config.mjs", "packages/eslint-config/base.js",
               "turbo.json", ".npmrc", "apps/rallysource-api/.npmrc",
-              "apps/rallysource-api/nest-cli.json"]:
+              "apps/rallysource-api/nest-cli.json",
+              "apps/rallysource-web/tsconfig.json", "apps/rallysource-teams/tsconfig.app.json",
+              "apps/rallysource-api/tsconfig.build.json", "packages/tsconfig/tsconfig.base.json"]:
         assert pp.is_protected(p), p
     for p in ["apps/rallysource-api/src/config/app.config.ts", "package.json",
-              "apps/rallysource-api/package.json", "apps/rallysource-web/src/App.tsx"]:
+              "apps/rallysource-api/package.json", "apps/rallysource-web/src/App.tsx",
+              "apps/rallysource-api/src/tsconfig-helpers.ts"]:
         assert not pp.is_protected(p), p
     mp = PathPolicy(t.policy.manifest_paths)
     assert mp.violations(["package.json", "apps/rallysource-api/package.json",
