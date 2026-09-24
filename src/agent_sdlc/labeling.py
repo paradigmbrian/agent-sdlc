@@ -3,12 +3,13 @@ from __future__ import annotations
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from typing import Any
 
 from agent_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
 from agent_sdlc.decisions.gates import GATES, option_keys, triage_state, work_item_text
 from agent_sdlc.ports import AdoPort, DeciderPort
 from agent_sdlc.store import LabelInput, Store
-from agent_sdlc.types import Calibration
+from agent_sdlc.types import Calibration, Decision
 
 MIN_LABELS = 30
 
@@ -71,14 +72,33 @@ def label_triage(ado: AdoPort, decider: DeciderPort, store: Store, limit: int,
     return count
 
 
-def label_logged(store: Store, gate: str, limit: int, ask: Callable[[str], str]) -> int:
+def _label_one(store: Store, gate: str, decision_id: int, d: Decision, state: dict[str, Any],
+               ask: Callable[[str], str]) -> bool:
+    print(f"\n=== decision {decision_id} ({gate}.{d.question}) ===")
+    for k, v in state.items():
+        print(f"--- {k} ---\n{str(v)[:1500]}")
+    gold = _ask_gold(ask, d.question, option_keys(GATES[gate][d.question]), d.answer)
+    if gold is None:
+        return False
+    store.add_label(LabelInput(gate, d.question, d.raw_probs, gold, "manual", decision_id))
+    return True
+
+
+def label_logged(store: Store, gate: str, limit: int, ask: Callable[[str], str],
+                 abandoned_only: bool = False) -> int:
+    """Label logged decisions. With abandoned_only, only decisions from items whose PR was
+    abandoned, each item introduced by its logged PR comments (spec §7.1)."""
+    if not abandoned_only:
+        return sum(_label_one(store, gate, decision_id, d, state, ask)
+                   for decision_id, d, state in store.unlabeled_decisions(gate, limit))
     count = 0
-    for decision_id, d, state in store.unlabeled_decisions(gate, limit):
-        print(f"\n=== decision {decision_id} ({gate}.{d.question}) ===")
-        for k, v in state.items():
-            print(f"--- {k} ---\n{str(v)[:1500]}")
-        gold = _ask_gold(ask, d.question, option_keys(GATES[gate][d.question]), d.answer)
-        if gold is not None:
-            store.add_label(LabelInput(gate, d.question, d.raw_probs, gold, "manual", decision_id))
-            count += 1
+    shown: set[int] = set()
+    rows = store.unlabeled_decisions_for_items(gate, store.abandoned_item_ids(), limit)
+    for decision_id, item_id, d, state in rows:
+        if item_id not in shown:
+            shown.add(item_id)
+            print(f"\n##### item #{item_id} (PR abandoned) #####")
+            for st in store.decision_states(item_id, "comment"):
+                print(f"--- PR comment ---\n{str(st.get('comment', ''))[:1500]}")
+        count += _label_one(store, gate, decision_id, d, state, ask)
     return count

@@ -49,6 +49,8 @@ def _parser() -> argparse.ArgumentParser:
     lab = sub.add_parser("label")
     lab.add_argument("gate", choices=sorted(GATES))
     lab.add_argument("--limit", type=int, default=20)
+    lab.add_argument("--abandoned", action="store_true",
+                     help="only decisions from items whose PR was abandoned")
     cal = sub.add_parser("calibrate")
     cal.add_argument("gate", nargs="?", choices=sorted(GATES))
     cal.add_argument("--promote", action="store_true")
@@ -181,11 +183,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{gate}.{q}: n={r.n} T={r.temperature:.3f} ECE={r.ece:.3f} "
                       f"acc={r.accuracy:.3f} mode={r.mode} — {r.message}")
     elif args.cmd == "label":
-        if args.gate == "triage":
+        if args.gate == "triage" and not args.abandoned:
             _, ado, decider = _runtime(target, store, Path(args.workspaces), True, traces)
             n = label_triage(ado, decider, store, args.limit, input)
         else:
-            n = label_logged(store, args.gate, args.limit, input)
+            n = label_logged(store, args.gate, args.limit, input, abandoned_only=args.abandoned)
         print(f"recorded {n} labels")
     elif args.cmd == "metrics":
         now = datetime.now(UTC)
