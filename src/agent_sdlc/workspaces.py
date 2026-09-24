@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
+from agent_sdlc.fsutil import ensure_private_dir
 from agent_sdlc.targets import TargetConfig
 from agent_sdlc.types import CommandResult
+
+log = logging.getLogger(__name__)
 
 # HOME is deliberately absent: repo commands and git get a scratch HOME (C2).
 _SAFE_ENV_KEYS = (
@@ -64,6 +70,18 @@ def _read_env_template(path: Path | None) -> dict[str, str]:
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip().strip('"')
     return out
+
+
+def _write_log(path: Path, command: str, output: str, code: int) -> str | None:
+    try:
+        ensure_private_dir(path.parent)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"$ {command}\n{output}\n[exit {code}]\n")
+        return str(path)
+    except OSError as e:
+        log.warning("could not write command log %s: %s", path, e)
+        return None
 
 
 class Workspaces:
@@ -138,7 +156,7 @@ class Workspaces:
         self._git("reset", "--hard", "HEAD", cwd=wt)
         self._git("clean", "-fd", cwd=wt)
 
-    def run(self, name: str, command: str, wt: Path) -> CommandResult:
+    def run(self, name: str, command: str, wt: Path, log: Path | None = None) -> CommandResult:
         self.home.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
         try:
@@ -156,15 +174,19 @@ class Workspaces:
             code, out = r.returncode, (r.stdout + r.stderr)
         except subprocess.TimeoutExpired:
             code, out = 124, f"timed out after {self._t.repo.command_timeout_s}s"
+        written = _write_log(log, command, out, code) if log is not None else None
         return CommandResult(
-            name, command, code, out[-_OUTPUT_TAIL:], round(time.monotonic() - start, 2)
+            name, command, code, out[-_OUTPUT_TAIL:], round(time.monotonic() - start, 2),
+            written,
         )
 
-    def install(self, wt: Path) -> CommandResult:
-        return self.run("install", self._t.repo.install, wt)
+    def install(self, wt: Path, log: Path | None = None) -> CommandResult:
+        return self.run("install", self._t.repo.install, wt, log)
 
-    def run_checks(self, wt: Path) -> list[CommandResult]:
-        return [self.run(name, cmd, wt) for name, cmd in self._t.repo.commands.items()]
+    def run_checks(self, wt: Path,
+                   log_for: Callable[[str], Path | None] | None = None) -> list[CommandResult]:
+        return [self.run(name, cmd, wt, log_for(name) if log_for else None)
+                for name, cmd in self._t.repo.commands.items()]
 
     def commit(self, wt: Path, message: str) -> bool:
         self._git("add", "-A", cwd=wt)
@@ -194,8 +216,25 @@ class Workspaces:
             )
         return total
 
-    def diff(self, wt: Path, max_chars: int = 60000) -> str:
-        return self._git("diff", self._range(), cwd=wt)[:max_chars]
+    def diff(self, wt: Path, max_chars: int = 60000, paths: list[str] | None = None) -> str:
+        extra = ["--", *paths] if paths else []
+        return self._git("diff", self._range(), *extra, cwd=wt)[:max_chars]
+
+    def blob_digest(self, wt: Path, paths: list[str]) -> str:
+        """sha256 over (path, blob at HEAD) for `paths`; a path absent at HEAD counts as
+        deleted, so removing a manifest changes the digest too."""
+        blobs: dict[str, str] = {}
+        if paths:
+            out = self._git("ls-tree", "-z", "HEAD", "--", *paths, cwd=wt)
+            for entry in filter(None, out.split("\0")):
+                meta, path = entry.split("\t", 1)
+                blobs[path] = meta.split()[2]
+        lines = [f"{p}:{blobs.get(p, 'deleted')}" for p in sorted(paths)]
+        return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+    def tracked_files(self, wt: Path) -> list[str]:
+        out = self._git("ls-tree", "-r", "-z", "--name-only", "HEAD", cwd=wt)
+        return sorted(p for p in out.split("\0") if p)
 
     def remove(self, item_id: int, branch: str) -> None:
         path = self.worktree_path(item_id)

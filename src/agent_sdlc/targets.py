@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AdoConfig(BaseModel):
@@ -39,7 +39,16 @@ class RepoConfig(BaseModel):
 
 class PolicyConfig(BaseModel):
     protected_paths: list[str]
+    # Changes to these park the item for human approval before install/verify (spec §5.2).
+    manifest_paths: list[str] = Field(default_factory=list)
     max_diff_lines: int = 600
+
+    @model_validator(mode="after")
+    def _disjoint(self) -> PolicyConfig:
+        both = sorted(set(self.protected_paths) & set(self.manifest_paths))
+        if both:
+            raise ValueError(f"paths cannot be both protected and manifest: {both}")
+        return self
 
 
 class RunWindow(BaseModel):
@@ -62,6 +71,8 @@ class Limits(BaseModel):
     max_daily_agent_turns: int = 400
     max_daily_tokens: int = 20_000_000
     run_window: RunWindow | None = None
+    max_denials_per_session: int = 5
+    stale_after_minutes: int = 120
 
 
 class AuthConfig(BaseModel):

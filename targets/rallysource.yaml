@@ -29,6 +29,21 @@ policy:
     - "**/*.pem"
     - "**/*.key"
     - "sonar-project.properties"
+    # Tooling config that verify executes as code (checked against the tree 2026-09-24).
+    # Root-anchored so app source such as apps/*/src/config/app.config.ts stays writable.
+    - "*.config.*"
+    - "apps/*/*.config.*"
+    - "packages/*/*.config.*"
+    - "packages/eslint-config/**"
+    - "turbo.json"
+    - ".npmrc"
+    - "**/.npmrc"
+    - "**/nest-cli.json"
+  manifest_paths:
+    - "**/package.json"
+    - "package-lock.json"
+    - "**/package-lock.json"
+    - "**/npm-shrinkwrap.json"
   max_diff_lines: 600
 limits:
   max_concurrent_items: 1
@@ -39,6 +54,8 @@ limits:
   max_daily_agent_turns: 400
   max_daily_tokens: 20000000
   run_window: null
+  max_denials_per_session: 5
+  stale_after_minutes: 120
 auth:
   mode: subscription
 laya:

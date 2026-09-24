@@ -4,7 +4,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from agent_sdlc.targets import RunWindow, TargetConfig, load_target
+from agent_sdlc.policy import PathPolicy
+from agent_sdlc.targets import PolicyConfig, RunWindow, TargetConfig, load_target
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,3 +58,27 @@ def test_run_window_same_day_and_wrapping() -> None:
     assert day.contains(time(12)) and not day.contains(time(18))
     night = RunWindow(start=time(19), end=time(7))
     assert night.contains(time(23)) and night.contains(time(3)) and not night.contains(time(12))
+
+
+def test_rallysource_protects_tooling_config_but_not_app_config() -> None:
+    t = load_target(ROOT / "targets" / "rallysource.yaml")
+    pp = PathPolicy(t.policy.protected_paths)
+    for p in ["eslint.config.js", "commitlint.config.js", "apps/rallysource-web/vite.config.ts",
+              "apps/rallysource-teams/tailwind.config.ts", "apps/rallysource-web/postcss.config.js",
+              "apps/rallysource-api/eslint.config.mjs", "packages/eslint-config/base.js",
+              "turbo.json", ".npmrc", "apps/rallysource-api/.npmrc",
+              "apps/rallysource-api/nest-cli.json"]:
+        assert pp.is_protected(p), p
+    for p in ["apps/rallysource-api/src/config/app.config.ts", "package.json",
+              "apps/rallysource-api/package.json", "apps/rallysource-web/src/App.tsx"]:
+        assert not pp.is_protected(p), p
+    mp = PathPolicy(t.policy.manifest_paths)
+    assert mp.violations(["package.json", "apps/rallysource-api/package.json",
+                          "package-lock.json", "src/a.ts"]) == [
+        "apps/rallysource-api/package.json", "package-lock.json", "package.json"]
+    assert t.limits.max_denials_per_session == 5 and t.limits.stale_after_minutes == 120
+
+
+def test_policy_rejects_path_both_protected_and_manifest() -> None:
+    with pytest.raises(ValidationError):
+        PolicyConfig(protected_paths=["**/package.json"], manifest_paths=["**/package.json"])

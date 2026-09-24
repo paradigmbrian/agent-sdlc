@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -116,3 +117,52 @@ def test_c2_user_insteadof_rewrite_is_not_used(
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(fake_home / ".gitconfig"))
     ws = Workspaces(tmp_path / "w2", target)
     assert (ws.create(1, "agent/1-a") / "README.md").exists()
+
+
+def test_run_writes_full_log(ws: Workspaces, tmp_path: Path) -> None:
+    wt = ws.create(1, "agent/1-a")
+    log = tmp_path / "logs" / "big.log"
+    r = ws.run("big", "python3 -c \"print('x' * 9000)\"", wt, log=log)
+    assert len(r.output) == 8000 and r.log == str(log)
+    assert log.read_text().count("x") >= 9000
+    assert oct(log.stat().st_mode & 0o777) == "0o600"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_run_log_unwritable_dir(ws: Workspaces, tmp_path: Path) -> None:
+    wt = ws.create(1, "agent/1-a")
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=0o500)
+    r = ws.run("test", "sh check.sh", wt, log=locked / "sub" / "t.log")
+    assert r.ok and r.log is None
+
+
+def test_run_checks_log_for(ws: Workspaces, tmp_path: Path) -> None:
+    wt = ws.create(1, "agent/1-a")
+    [r] = ws.run_checks(wt, log_for=lambda name: tmp_path / f"{name}.log")
+    assert r.log == str(tmp_path / "test.log") and "ok" in (tmp_path / "test.log").read_text()
+
+
+def test_blob_digest_tracks_content_and_deletion(ws: Workspaces) -> None:
+    wt = ws.create(1, "agent/1-a")
+    base = ws.blob_digest(wt, ["README.md"])
+    assert base == ws.blob_digest(wt, ["README.md"])
+    (wt / "README.md").write_text("changed\n")
+    ws.commit(wt, "c")
+    changed = ws.blob_digest(wt, ["README.md"])
+    (wt / "README.md").unlink()
+    ws.commit(wt, "d")
+    deleted = ws.blob_digest(wt, ["README.md"])
+    assert len({base, changed, deleted}) == 3
+    assert "README.md" in ws.changed_files(wt)  # a deletion still shows up for the gate
+    assert ws.blob_digest(wt, []) == ws.blob_digest(wt, [])
+
+
+def test_tracked_files_and_diff_paths(ws: Workspaces) -> None:
+    wt = ws.create(1, "agent/1-a")
+    assert ws.tracked_files(wt) == ["README.md", "check.sh"]
+    (wt / "a.txt").write_text("a\n")
+    (wt / "b.txt").write_text("b\n")
+    ws.commit(wt, "ab")
+    d = ws.diff(wt, paths=["a.txt"])
+    assert "a.txt" in d and "b.txt" not in d
