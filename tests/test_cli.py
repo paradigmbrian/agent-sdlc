@@ -105,3 +105,8 @@ def test_cli_writes_log_file(db: str, tmp_path: Path, monkeypatch: pytest.Monkey
     for h in logging.getLogger().handlers:
         h.flush()
     assert "hello from test" in (tmp_path / "logs" / "agent-sdlc.log").read_text()
+
+
+def test_metrics_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(db, "metrics", "--days", "7") == 0
+    assert "Outcomes" in capsys.readouterr().out

@@ -10,6 +10,7 @@ from typing import Any
 from agent_sdlc.decisions.gates import GATES
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
 from agent_sdlc.logctx import configure_logging
+from agent_sdlc.metrics import render_metrics
 from agent_sdlc.orchestrator.transitions import requeue
 from agent_sdlc.store import Store
 from agent_sdlc.targets import TargetConfig, load_target
@@ -51,6 +52,8 @@ def _parser() -> argparse.ArgumentParser:
     cal = sub.add_parser("calibrate")
     cal.add_argument("gate", nargs="?", choices=sorted(GATES))
     cal.add_argument("--promote", action="store_true")
+    me = sub.add_parser("metrics")
+    me.add_argument("--days", type=int, default=30)
     return p
 
 
@@ -184,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             n = label_logged(store, args.gate, args.limit, input)
         print(f"recorded {n} labels")
+    elif args.cmd == "metrics":
+        now = datetime.now(UTC)
+        print(render_metrics(store, target.name, now - timedelta(days=args.days), now))
     elif args.cmd == "run":
         store.set_flag("poll_s", str(args.poll))
         scheduler, *_ = _runtime(target, store, Path(args.workspaces), args.dry_run_push,
