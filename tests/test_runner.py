@@ -1,5 +1,6 @@
 import asyncio
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -33,6 +34,7 @@ from agent_sdlc.types import (
     UsageLimitError,
     WorkItem,
 )
+from agent_sdlc.workspaces import git_env
 
 PP = PathPolicy(["infra/**", "**/.env*"])
 CP = CommandPolicy(["npm test"])
@@ -783,3 +785,39 @@ def test_pre_tool_use_hook_stops_cli_on_escalating_denial(
     assert captured["escalating"]["continue_"] is False
     assert (captured["escalating"]["stopReason"]
             == "agent-sdlc stopped the session: outside_worktree")
+
+
+# --- final-review fix wave: I0 gitignored writes, I1 SDK error after escalation, I4 kill switch ---
+
+
+def _ignoring_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=git_env())
+    (repo / ".gitignore").write_text("node_modules/\n")
+    return repo
+
+
+def test_i0_write_to_gitignored_path_is_denied(tmp_path: Path) -> None:
+    repo = _ignoring_repo(tmp_path)
+    inp = {"file_path": "node_modules/x/index.js"}
+    reason = check_tool(IMPLEMENTER, repo, PP, CP, "Write", inp)
+    assert reason == "protected path: node_modules/x/index.js is gitignored"
+    denial = evaluate_tool(IMPLEMENTER, repo, PP, CP, "Write", inp)
+    assert denial is not None and denial.category == "protected_path"
+    assert check_tool(IMPLEMENTER, repo, PP, CP, "Write", {"file_path": "src/a.ts"}) is None
+    absolute = {"file_path": str(repo / "node_modules" / ".bin" / "tsc")}
+    assert check_tool(IMPLEMENTER, repo, PP, CP, "Edit", absolute) == (
+        "protected path: node_modules/.bin/tsc is gitignored")
+    assert check_tool(IMPLEMENTER, repo, PP, CP, "Write",
+                      {"file_path": str(repo / "src" / "a.ts")}) is None
+
+
+def test_i0_gitignore_check_error_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _ignoring_repo(tmp_path)
+    monkeypatch.setattr(runner_mod, "_git_ignored", lambda path, cwd: None)
+    reason = check_tool(IMPLEMENTER, repo, PP, CP, "Edit", {"file_path": "src/a.ts"})
+    assert reason == "protected path: src/a.ts is gitignored"
+

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shlex
+import subprocess
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from typing import Any, cast
 
 from agent_sdlc.agents.roles import Role
 from agent_sdlc.agents.transcript import TranscriptWriter
-from agent_sdlc.policy import CommandPolicy, PathPolicy, categorize
+from agent_sdlc.policy import CommandPolicy, PathPolicy, _relative, categorize
 from agent_sdlc.types import (
     ESCALATE_CATEGORIES,
     AgentInfraError,
@@ -24,6 +25,7 @@ from agent_sdlc.types import (
     Usage,
     UsageLimitError,
 )
+from agent_sdlc.workspaces import git_env
 
 _WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 # Narrow on purpose (I2): only the provider's own usage/rate-limit wording or an HTTP 429 status,
@@ -112,8 +114,16 @@ def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: 
     if tool_name not in role.tools:
         return f"tool {tool_name} is not permitted for {role.name}"
     if tool_name in _WRITE_TOOLS:
-        path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        return path_policy.check_write(str(path), cwd)
+        target = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "")
+        if (reason := path_policy.check_write(target, cwd)) is not None:
+            return reason
+        # Write/Edit are outside the Bash sandbox: a gitignored path (node_modules, dist, ...)
+        # is invisible to commit, the diff checks and the manifest gate, so deny it (I0).
+        # Only in a real worktree, where .git is a file or a directory. Fails closed.
+        rel = _relative(target, cwd)
+        if (cwd / ".git").exists() and (rel is None or _git_ignored(rel, cwd) is not False):
+            return f"protected path: {rel} is gitignored"
+        return None
     if tool_name == "Read":
         return path_policy.check_read(str(tool_input.get("file_path", "")), cwd)
     if tool_name in ("Glob", "Grep"):
@@ -132,6 +142,16 @@ def _check_tool(role: Role, cwd: Path, path_policy: PathPolicy, command_policy: 
         reason = command_policy.check(command)
         return reason if reason is not None else _bash_path_violation(command, cwd, path_policy)
     return None
+
+
+def _git_ignored(path: str, cwd: Path) -> bool | None:
+    """True if git ignores `path` in the worktree at `cwd`, False if not, None on error."""
+    try:
+        code = subprocess.run(["git", "check-ignore", "-q", "--", path], cwd=cwd,
+                              capture_output=True, env=git_env()).returncode
+    except OSError:
+        return None
+    return {0: True, 1: False}.get(code)
 
 
 def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> str | None:
