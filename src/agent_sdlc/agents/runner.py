@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
 import re
 import shlex
@@ -10,8 +12,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from agent_sdlc.agents.roles import Role
+from agent_sdlc.agents.transcript import TranscriptWriter
 from agent_sdlc.policy import CommandPolicy, PathPolicy, categorize
 from agent_sdlc.types import (
+    ESCALATE_CATEGORIES,
     AgentInfraError,
     AgentInterrupted,
     AgentResult,
@@ -41,6 +45,28 @@ SANDBOX: dict[str, Any] = {
     "network": {"allowedDomains": [], "allowUnixSockets": [], "allowAllUnixSockets": False,
                 "allowLocalBinding": False},
 }
+
+log = logging.getLogger(__name__)
+# After an escalation interrupt, wait this long for the SDK's final ResultMessage (spec §5.3).
+_INTERRUPT_GRACE_S = 30.0
+
+
+def _deny(reason: str) -> dict[str, Any]:
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse", "permissionDecision": "deny",
+        "permissionDecisionReason": f"Blocked by agent-sdlc policy: {reason}"}}
+
+
+def _estimate(per_message: dict[str, dict[str, Any]]) -> Usage:
+    """Usage summed from AssistantMessage.usage, one entry per API message id."""
+    u = per_message.values()
+    return Usage(
+        turns=len(per_message),
+        input_tokens=sum(int(x.get("input_tokens", 0))
+                         + int(x.get("cache_creation_input_tokens", 0)) for x in u),
+        output_tokens=sum(int(x.get("output_tokens", 0)) for x in u),
+        cache_read_tokens=sum(int(x.get("cache_read_input_tokens", 0)) for x in u),
+    )
 
 
 def parse_usage_limit(text: str) -> bool:
@@ -151,15 +177,17 @@ def agent_env(config_dir: Path, auth_env: dict[str, str],
 class ClaudeAgentRunner:
     def __init__(self, path_policy: PathPolicy, command_policy: CommandPolicy, config_dir: Path,
                  auth_env: dict[str, str], should_stop: Callable[[], bool] = lambda: False,
-                 home: Path | None = None):
+                 home: Path | None = None, max_denials: int = 5):
         self._pp = path_policy
         self._cp = command_policy
         self._config_dir = config_dir
         self._home = home or config_dir.parent / "agent-home"
         self._auth_env = auth_env
         self._should_stop = should_stop
+        self._max_denials = max_denials
 
-    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int) -> AgentResult:
+    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int,
+                  trace: Path | None = None, token_budget: int | None = None) -> AgentResult:
         from claude_agent_sdk import (
             AssistantMessage,
             ClaudeAgentOptions,
@@ -180,9 +208,14 @@ class ClaudeAgentRunner:
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._home.mkdir(parents=True, exist_ok=True)
         denials: list[Denial] = []
+        escalated: str | None = None
+        per_message: dict[str, dict[str, Any]] = {}
+        writer = TranscriptWriter(trace)
+        writer.prompt(role.name, prompt)
 
         async def pre_tool_use(input_data: HookInput, tool_use_id: str | None,
                                context: HookContext) -> SyncHookJSONOutput:
+            nonlocal escalated
             # input_data is a TypedDict union; only PreToolUse events reach this matcher, and
             # PreToolUseHookInput carries tool_name/tool_input, so a plain dict view is safe here.
             data = cast(dict[str, Any], input_data)
@@ -192,11 +225,16 @@ class ClaudeAgentRunner:
             if denial is None:
                 return {}
             denials.append(denial)
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse", "permissionDecision": "deny",
-                "permissionDecisionReason": f"Blocked by agent-sdlc policy: {denial.reason}"}}
+            writer.denied(denial)
+            log.warning("denied %s %s [%s]: %s", role.name, tool, denial.category, denial.reason)
+            if escalated is None:
+                if denial.category in ESCALATE_CATEGORIES:
+                    escalated = denial.category
+                elif len(denials) >= self._max_denials:
+                    escalated = "denial_threshold"
+            return cast(SyncHookJSONOutput, _deny(denial.reason))
 
-        options = ClaudeAgentOptions(
+        options = ClaudeAgentOptions(  # unchanged from before
             system_prompt=role.system_prompt,
             cwd=str(cwd),
             tools=list(role.tools),
@@ -209,34 +247,72 @@ class ClaudeAgentRunner:
             env=agent_env(self._config_dir, self._auth_env, self._home),
             sandbox=cast(SandboxSettings, SANDBOX),
         )
+
+        def partial(usage: Usage | None = None) -> AgentResult:
+            return AgentResult("", usage or _estimate(per_message), tuple(denials),
+                               escalated=escalated, trace=writer.path,
+                               trace_error=writer.error, role=role.name,
+                               usage_estimated=usage is None)
+
         texts: list[str] = []
         result: Any = None
         reset_at: datetime | None = None
+        stopping = False
         try:
             async with ClaudeSDKClient(options=options) as client:
                 await client.query(prompt)
-                async for msg in client.receive_response():
-                    if self._should_stop():
-                        await client.interrupt()
-                        raise AgentInterrupted(role.name)
-                    if isinstance(msg, AssistantMessage):
-                        texts += [b.text for b in msg.content if isinstance(b, TextBlock)]
-                    elif isinstance(msg, RateLimitEvent):
-                        info = msg.rate_limit_info
-                        if info.status == "rejected" and info.resets_at:  # M11
-                            reset_at = datetime.fromtimestamp(int(info.resets_at), UTC)
-                    elif isinstance(msg, ResultMessage):
-                        result = msg
+                try:
+                    async with asyncio.timeout(None) as window:
+                        async for msg in client.receive_response():
+                            writer.message(msg)
+                            if self._should_stop():
+                                await client.interrupt()
+                                raise AgentInterrupted(role.name)
+                            if isinstance(msg, AssistantMessage):
+                                texts += [b.text for b in msg.content
+                                          if isinstance(b, TextBlock)]
+                                u = getattr(msg, "usage", None)
+                                if u:
+                                    key = getattr(msg, "message_id", None) or f"m{len(per_message)}"
+                                    per_message[key] = dict(u)
+                            elif isinstance(msg, RateLimitEvent):
+                                info = msg.rate_limit_info
+                                if info.status == "rejected" and info.resets_at:  # M11
+                                    reset_at = datetime.fromtimestamp(int(info.resets_at), UTC)
+                            elif isinstance(msg, ResultMessage):
+                                result = msg
+                            if (escalated is None and token_budget is not None
+                                    and _estimate(per_message).tokens > token_budget):
+                                escalated = "budget"
+                            if escalated is not None and not stopping:
+                                stopping = True
+                                log.warning("stopping %s session: %s", role.name, escalated)
+                                await client.interrupt()
+                                window.reschedule(
+                                    asyncio.get_running_loop().time() + _INTERRUPT_GRACE_S)
+                except TimeoutError:
+                    if not stopping:
+                        raise
         except AgentInterrupted:
             raise
         except Exception as e:
             if getattr(e, "api_error_status", None) == 429 or parse_usage_limit(str(e)):
-                raise UsageLimitError(str(e), reset_at or _reset_from_text(str(e))) from e
+                raise UsageLimitError(str(e), reset_at or _reset_from_text(str(e)),
+                                      partial=partial()) from e
             if isinstance(e, ClaudeSDKError):
-                raise AgentInfraError(f"{role.name}: {type(e).__name__}: {e}") from e
+                raise AgentInfraError(f"{role.name}: {type(e).__name__}: {e}",
+                                      partial=partial()) from e
             raise
+        finally:
+            writer.close()
         if result is None:
-            raise AgentInfraError(f"{role.name}: agent session ended without a result")
+            if escalated is not None:
+                return AgentResult(texts[-1].strip() if texts else "", _estimate(per_message),
+                                   tuple(denials), escalated=escalated, trace=writer.path,
+                                   trace_error=writer.error, role=role.name,
+                                   usage_estimated=True)
+            raise AgentInfraError(f"{role.name}: agent session ended without a result",
+                                  partial=partial())
         text = (getattr(result, "result", None) or (texts[-1] if texts else "")).strip()
         u = getattr(result, "usage", None) or {}
         usage = Usage(
@@ -248,6 +324,13 @@ class ClaudeAgentRunner:
         )
         if result.is_error and (getattr(result, "api_error_status", None) == 429
                                 or parse_usage_limit(text)):
-            raise UsageLimitError(text, reset_at or _reset_from_text(text), usage)
+            raise UsageLimitError(text, reset_at or _reset_from_text(text), usage,
+                                  partial=partial(usage))
         error = str(getattr(result, "subtype", "") or "error") if result.is_error else ""
-        return AgentResult(text, usage, tuple(denials), bool(result.is_error), error)
+        cost = getattr(result, "total_cost_usd", None)
+        return AgentResult(
+            text, usage, tuple(denials), bool(result.is_error), error, escalated=escalated,
+            session_id=str(getattr(result, "session_id", "") or ""),
+            duration_ms=int(getattr(result, "duration_ms", 0) or 0),
+            cost_usd=float(cost) if cost is not None else None,
+            trace=writer.path, trace_error=writer.error, role=role.name)

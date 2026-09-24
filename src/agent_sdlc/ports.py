@@ -8,7 +8,9 @@ from agent_sdlc.types import AgentResult, CommandResult, Decision, PrComment, Wo
 
 
 class AgentRunner(Protocol):
-    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int) -> AgentResult: ...
+    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int,
+                  trace: Path | None = None,
+                  token_budget: int | None = None) -> AgentResult: ...
 
 
 class DeciderPort(Protocol):

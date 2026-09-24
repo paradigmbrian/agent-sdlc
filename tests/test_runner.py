@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -6,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import agent_sdlc.agents.runner as runner_mod
 from agent_sdlc.agents.roles import (
     IMPLEMENTER,
     PLANNER,
@@ -574,3 +576,136 @@ def test_agent_result_denied_is_derived_from_denials() -> None:
     r = AgentResult("t", Usage(), (Denial("Read", "outside_worktree",
                                           "path is outside the worktree"),))
     assert r.denied == ("Read: path is outside the worktree",)
+
+
+# --- Task 5: transcript, escalation, token budget, session metadata ----------------------
+
+
+def _hook_call(tool: str, inp: dict[str, Any]) -> Any:
+    async def call(client: Any) -> None:
+        hook = client.options.hooks["PreToolUse"][0].hooks[0]
+        await hook({"tool_name": tool, "tool_input": inp}, "tu", None)
+    return call
+
+
+def _assistant(sdk: Any, mid: str, inp: int, out: int) -> Any:
+    msg = sdk.AssistantMessage([sdk.TextBlock("working")])
+    msg.usage, msg.message_id = {"input_tokens": inp, "output_tokens": out}, mid
+    return msg
+
+
+def test_run_escalates_on_outside_worktree_and_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.AssistantMessage([sdk.TextBlock("reading")]),
+               sdk.ResultMessage(is_error=True, num_turns=2, subtype="error_during_execution",
+                                 usage={"input_tokens": 5, "output_tokens": 1})]
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert captured["client"].interrupted is True
+    assert res.escalated == "outside_worktree" and res.role == "implementer"
+    assert res.denials[0].category == "outside_worktree" and res.usage.turns == 2
+
+
+def test_run_escalates_at_denial_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Bash", {"command": "git push"}),
+               _hook_call("Bash", {"command": "curl x"}),
+               sdk.ResultMessage(num_turns=1, result="r", usage={})]
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, max_denials=2)
+    res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "denial_threshold" and len(res.denials) == 2
+
+
+def test_run_below_threshold_does_not_escalate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Bash", {"command": "git push"}),
+               sdk.ResultMessage(num_turns=1, result="r", usage={})]
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated is None and captured["client"].interrupted is False
+
+
+def test_run_token_budget_interrupts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_assistant(sdk, "m1", 600, 500),
+               sdk.ResultMessage(num_turns=1, result="r",
+                                 usage={"input_tokens": 600, "output_tokens": 500})]
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5, token_budget=1000))
+    assert res.escalated == "budget" and captured["client"].interrupted is True
+
+
+def test_run_escalation_without_result_estimates_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}), _assistant(sdk, "m1", 10, 2),
+               _assistant(sdk, "m1", 10, 2)]  # same message id counted once
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "outside_worktree" and res.usage_estimated is True
+    assert res.usage == Usage(1, 10, 2)
+
+
+def test_run_escalation_grace_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    monkeypatch.setattr(runner_mod, "_INTERRUPT_GRACE_S", 0.05)
+
+    async def hang(client: Any) -> None:
+        await asyncio.sleep(5)
+
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.AssistantMessage([sdk.TextBlock("x")]), hang]
+    res = asyncio.run(asyncio.wait_for(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5), timeout=2))
+    assert res.escalated == "outside_worktree" and res.usage_estimated is True
+
+
+def test_run_writes_transcript_and_session_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    result = sdk.ResultMessage(num_turns=1, result="done", usage={})
+    result.session_id, result.duration_ms, result.total_cost_usd = "s-1", 1500, 0.02
+    script += [sdk.AssistantMessage([sdk.TextBlock("hi")]),
+               _hook_call("Bash", {"command": "git push"}), result]
+    trace = tmp_path / "traces" / "t.jsonl"
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        PLANNER, "plan it", tmp_path, max_turns=5, trace=trace))
+    types_ = [json.loads(line)["type"] for line in trace.read_text().splitlines()]
+    assert types_ == ["prompt", "assistant_text", "denied", "result"]
+    assert (res.trace, res.session_id, res.duration_ms, res.cost_usd) == (
+        str(trace), "s-1", 1500, 0.02)
+
+
+def test_run_infra_error_carries_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Bash", {"command": "git push"}), sdk.ClaudeSDKError("boom")]
+    with pytest.raises(AgentInfraError) as ei:
+        asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+            IMPLEMENTER, "p", tmp_path, max_turns=5))
+    partial = ei.value.partial
+    assert partial is not None and partial.role == "implementer" and len(partial.denials) == 1

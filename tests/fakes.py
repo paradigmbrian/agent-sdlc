@@ -48,9 +48,14 @@ class FakeRunner:
     reviewer says no blocking issues."""
     behaviors: dict[str, Behavior] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
+    traces: list[Path | None] = field(default_factory=list)
+    budgets: list[int | None] = field(default_factory=list)
 
-    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int) -> AgentResult:
+    async def run(self, role: Role, prompt: str, cwd: Path, max_turns: int,
+                  trace: Path | None = None, token_budget: int | None = None) -> AgentResult:
         self.calls.append((role.name, prompt))
+        self.traces.append(trace)
+        self.budgets.append(token_budget)
         if role.name in self.behaviors:
             out = self.behaviors[role.name](role, prompt, cwd)
             return await out if isinstance(out, Awaitable) else out  # type: ignore[misc]
