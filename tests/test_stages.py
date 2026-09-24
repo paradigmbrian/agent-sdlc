@@ -344,3 +344,45 @@ async def test_awaiting_records_pr_comment_events(parts) -> None:  # type: ignor
     res = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))
     assert [(e.kind, e.payload["intent"]) for e in res.events] == [
         ("pr_comment", "change_request")]
+
+
+# --- fix round 1 ---------------------------------------------------------------------------
+
+
+async def test_verify_rechecks_policy_before_manifest_and_install(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    """A protected-path violation committed alongside an approved manifest change must still
+    park POLICY at verify, before the manifest gate lets install and checks run (finding 1)."""
+    ex, _, ws, runner = _executor(tmp_path, _with_manifests(target), origin_repo)
+    wt = ws.create(5, "agent/5-add-feature")
+    (wt / "infra").mkdir()
+    (wt / "infra" / "x.bicep").write_text("x")
+    (wt / "package.json").write_text('{"dependencies": {"left-pad": "1.0.0"}}\n')
+    ws.commit(wt, "sneak")
+    digest = ws.blob_digest(wt, ["package.json"])
+    res = await ex.run(item(Stage.VERIFY, data={"manifest_approved": digest}))
+    assert res.transition.park_reason is ParkReason.POLICY
+    assert "infra/x.bicep" in res.transition.note
+    assert [e for e in res.events if e.kind == "check"] == []  # no install ran
+    assert runner.calls == []
+
+
+async def test_stopped_note_quotes_the_escalating_denial(parts) -> None:  # type: ignore[no-untyped-def]
+    """The escalating denial is usually last; the quoted note and last_denials must keep it
+    even when more than _PARK_DENIALS denials preceded it (finding 2)."""
+    ex, _, ws, _, runner = parts
+    ws.create(5, "agent/5-add-feature")
+    denials = tuple(
+        Denial("Bash", "command_not_allowlisted", f"command not allowlisted: cmd{i}")
+        for i in range(6)
+    ) + (Denial("Read", "outside_worktree", "path is outside the worktree",
+               '{"file_path": "/Users/x/.ssh/config"}'),)
+    runner.behaviors["implementer"] = lambda r, p, c: AgentResult(
+        "", Usage(1, 5, 5), denials, escalated="outside_worktree")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    assert res.transition.park_reason is ParkReason.POLICY
+    assert "outside_worktree" in res.transition.note and ".ssh/config" in res.transition.note
+    assert res.data["last_denials"][-1] == {
+        "role": "implementer", "tool": "Read", "category": "outside_worktree",
+        "reason": "path is outside the worktree", "input": '{"file_path": "/Users/x/.ssh/config"}'}

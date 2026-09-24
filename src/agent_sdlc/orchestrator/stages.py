@@ -148,7 +148,8 @@ class StageExecutor:
         counts[res.role] = counts.get(res.role, 0) + len(new)
         kept = list(item.data.get("denials") or [])
         kept += new[: max(0, _KEPT_DENIALS - len(kept))]
-        return {"denial_counts": counts, "denials": kept, "last_denials": new[:_PARK_DENIALS]}
+        return {"denial_counts": counts, "denials": kept,
+                "last_denials": new[-_PARK_DENIALS:]}
 
     def _stopped(self, res: AgentResult, events: list[EventInput],
                  data: dict[str, Any]) -> StepResult | None:
@@ -162,7 +163,7 @@ class StageExecutor:
         else:
             quoted = "\n".join(f"- {d.tool} [{d.category}]: {d.reason}"
                                + (f" {d.input}" if d.input else "")
-                               for d in res.denials[:_PARK_DENIALS])
+                               for d in res.denials[-_PARK_DENIALS:])
             t = park(ParkReason.POLICY,
                      f"The {res.role} agent was stopped after blocked tool calls "
                      f"({res.escalated}):\n{quoted}")
@@ -177,7 +178,21 @@ class StageExecutor:
                               self._t.limits.max_verify_retries)
         return StepResult(t, res.usage, events=events, data=data)
 
-    # manifests & install ---------------------------------------------------
+    # policy, manifests & install --------------------------------------------
+    def _policy_park(self, wt: Path, when: str) -> StepResult | None:
+        """Protected-path and diff-limit checks, re-run wherever a park (e.g. an unapproved
+        manifest) may have let a human requeue past them without a fresh recheck."""
+        violations = self._pp.violations(self._ws.changed_files(wt))
+        if violations:
+            return StepResult(park(
+                ParkReason.POLICY, f"{when} found protected paths: " + ", ".join(violations)))
+        lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
+        if lines > limit:
+            return StepResult(park(
+                ParkReason.POLICY,
+                f"{when}: the diff is {lines} lines, over the {limit}-line limit."))
+        return None
+
     def _manifest_gate(self, item: Item, wt: Path) -> StepResult | None:
         """Park when the branch changes a manifest in a way no human has approved (§5.2)."""
         files = self._mp.violations(self._ws.changed_files(wt))
@@ -252,11 +267,14 @@ class StageExecutor:
         t = after_implement(self._pp.violations(files), bool(files), self._ws.diff_lines(wt),
                             self._t.policy.max_diff_lines)
         if t.to is Stage.VERIFY and (gate := self._manifest_gate(item, wt)):
-            return replace(gate, usage=res.usage, events=events, data={**data, **gate.data})
+            return replace(gate, usage=res.usage, events=events,
+                           data={"feedback": None, **data, **gate.data})
         return StepResult(t, res.usage, data={"feedback": None, **data}, events=events)
 
     async def _verify(self, item: Item) -> StepResult:
         wt = self._ws.create(item.id, item.branch)
+        if policy := self._policy_park(wt, "Verify"):
+            return policy
         if gate := self._manifest_gate(item, wt):
             return gate
         failed_install, inst_data, events = self._ensure_installed(item, wt)
@@ -273,15 +291,15 @@ class StageExecutor:
                 return StepResult(park(
                     ParkReason.POLICY,
                     "Lint fixes touched protected paths: " + ", ".join(violations)),
-                    events=events)
+                    events=events, data=inst_data)
             if gate := self._manifest_gate(item, wt):
-                return replace(gate, events=events)
+                return replace(gate, events=events, data={**inst_data, **gate.data})
             lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
             if lines > limit:  # M9
                 return StepResult(park(
                     ParkReason.POLICY,
                     f"After lint fixes the diff is {lines} lines, over the {limit}-line limit."),
-                    events=events)
+                    events=events, data=inst_data)
         t = after_verify(results, item.attempt, self._t.limits.max_verify_retries)
         return StepResult(t, data={"checks": [_check_dict(r) for r in results], **inst_data},
                           events=events)
@@ -307,11 +325,8 @@ class StageExecutor:
     async def _pr_open(self, item: Item) -> StepResult:
         wi = self._ado.get_work_item(item.id)
         wt = self._ws.create(item.id, item.branch)
-        violations = self._pp.violations(self._ws.changed_files(wt))
-        if violations:
-            return StepResult(park(
-                ParkReason.POLICY,
-                "Pre-push check found protected paths: " + ", ".join(violations)))
+        if policy := self._policy_park(wt, "Pre-push check"):
+            return policy
         if gate := self._manifest_gate(item, wt):
             return gate
         self._ado.push_branch(wt, item.branch)
