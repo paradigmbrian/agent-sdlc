@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
@@ -8,11 +8,29 @@ from typing import Any, Literal
 from sqlalchemy import JSON, ForeignKey, String, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
-from agent_sdlc.types import Calibration, Decision, Item, ParkReason, Stage, Usage, WorkItem
+from agent_sdlc.types import (
+    Calibration,
+    Decision,
+    EventInput,
+    Item,
+    ParkReason,
+    Stage,
+    Usage,
+    WorkItem,
+)
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _db_ts(ts: datetime | None) -> datetime:
+    """Stored as naive UTC (SQLite keeps no tzinfo)."""
+    return (ts or _now()).astimezone(UTC).replace(tzinfo=None)
+
+
+def _aware(ts: datetime) -> datetime:
+    return ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
 
 
 class Base(DeclarativeBase):
@@ -91,6 +109,38 @@ class DailyUsageRow(Base):
     output_tokens: Mapped[int] = mapped_column(default=0)
 
 
+class EventRow(Base):
+    __tablename__ = "events"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    item_id: Mapped[int | None] = mapped_column(ForeignKey("items.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    stage: Mapped[str | None]
+    attempt: Mapped[int | None]
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+@dataclass(frozen=True)
+class Event:
+    id: int
+    item_id: int | None
+    ts: datetime          # aware UTC
+    kind: str
+    stage: str | None
+    attempt: int | None
+    payload: dict[str, Any]
+
+
+def _to_event(r: EventRow) -> Event:
+    return Event(r.id, r.item_id, _aware(r.ts), r.kind, r.stage, r.attempt, dict(r.payload or {}))
+
+
+def _event_row(ev: EventInput, at: Item | None, ts: datetime | None = None) -> EventRow:
+    return EventRow(item_id=at.id if at else None, ts=_db_ts(ts), kind=ev.kind,
+                    stage=at.stage.value if at else None, attempt=at.attempt if at else None,
+                    payload=dict(ev.payload))
+
+
 @dataclass(frozen=True)
 class LabelInput:
     gate: str
@@ -160,12 +210,17 @@ class Store:
         row.infra_failures, row.pr_id = item.infra_failures, item.pr_id
         row.data, row.usage, row.updated_at = dict(item.data), item.usage.to_dict(), _now()
 
-    def save(self, item: Item) -> None:
+    def save(self, item: Item, events: Sequence[EventInput] = (), at: Item | None = None) -> None:
         with self._session() as s, s.begin():
             self._write_item(s, item)
+            for ev in events:
+                s.add(_event_row(ev, at or item))
 
     def commit_step(self, item: Item, decisions: list[tuple[Decision, dict[str, Any]]],
-                    usage: Usage, day: date, labels: list[LabelInput]) -> None:
+                    usage: Usage, day: date, labels: list[LabelInput],
+                    events: Sequence[EventInput] = (), at: Item | None = None) -> None:
+        """One step, one transaction: item state, decisions, labels, usage and the events
+        describing the step. `at` is the item as it was when the step ran (event context)."""
         with self._session() as s, s.begin():
             self._write_item(s, item)
             for d, state in decisions:
@@ -175,6 +230,8 @@ class Store:
                                   actionable=d.actionable, state=state))
             for lab in labels:
                 s.add(self._label_row(lab))
+            for ev in events:
+                s.add(_event_row(ev, at or item))
             self._add_usage(s, day, usage)
 
     # decisions & labels ----------------------------------------------------
@@ -208,6 +265,71 @@ class Store:
             q = (select(LabelRow).where(LabelRow.gate == gate, LabelRow.question == question)
                  .order_by(LabelRow.id))
             return [(dict(r.raw_probs), r.gold) for r in s.scalars(q)]
+
+    def labeled_decisions(self, gate: str, question: str) -> list[tuple[str, str]]:
+        """(logged answer, human gold) for every label tied to a logged decision."""
+        with self._session() as s:
+            q = (select(DecisionRow.answer, LabelRow.gold)
+                 .join(LabelRow, LabelRow.decision_id == DecisionRow.id)
+                 .where(DecisionRow.gate == gate, DecisionRow.question == question)
+                 .order_by(LabelRow.id))
+            return [(str(a), str(g)) for a, g in s.execute(q).tuples()]
+
+    def unlabeled_decisions_for_items(
+        self, gate: str, item_ids: set[int], limit: int
+    ) -> list[tuple[int, int, Decision, dict[str, Any]]]:
+        if not item_ids:
+            return []
+        with self._session() as s:
+            labeled = select(LabelRow.decision_id).where(
+                LabelRow.decision_id.is_not(None)).scalar_subquery()
+            q = (select(DecisionRow).where(DecisionRow.gate == gate)
+                 .where(DecisionRow.item_id.in_(item_ids))
+                 .where(DecisionRow.id.not_in(labeled))
+                 .order_by(DecisionRow.item_id, DecisionRow.id).limit(limit))
+            return [(r.id, r.item_id, _to_decision(r), dict(r.state)) for r in s.scalars(q)]
+
+    def decision_states(self, item_id: int, gate: str) -> list[dict[str, Any]]:
+        with self._session() as s:
+            q = (select(DecisionRow).where(DecisionRow.item_id == item_id,
+                                           DecisionRow.gate == gate).order_by(DecisionRow.id))
+            return [dict(r.state) for r in s.scalars(q)]
+
+    def decisions_with_ts(self, item_id: int) -> list[tuple[datetime, Decision]]:
+        with self._session() as s:
+            q = select(DecisionRow).where(DecisionRow.item_id == item_id).order_by(DecisionRow.id)
+            return [(_aware(r.created_at), _to_decision(r)) for r in s.scalars(q)]
+
+    # events ------------------------------------------------------------------------------------
+    def add_event(self, kind: str, payload: dict[str, Any] | None = None, *,
+                  item: Item | None = None, ts: datetime | None = None) -> None:
+        with self._session() as s, s.begin():
+            s.add(_event_row(EventInput(kind, payload or {}), item, ts))
+
+    def events_for(self, item_id: int) -> list[Event]:
+        with self._session() as s:
+            q = select(EventRow).where(EventRow.item_id == item_id).order_by(EventRow.id)
+            return [_to_event(r) for r in s.scalars(q)]
+
+    def events_since(self, since: datetime, kinds: Iterable[str] | None = None) -> list[Event]:
+        with self._session() as s:
+            q = select(EventRow).where(EventRow.ts >= _db_ts(since))
+            if kinds is not None:
+                q = q.where(EventRow.kind.in_(list(kinds)))
+            return [_to_event(r) for r in s.scalars(q.order_by(EventRow.id))]
+
+    def last_event_ts(self, item_id: int) -> datetime | None:
+        with self._session() as s:
+            q = (select(EventRow.ts).where(EventRow.item_id == item_id)
+                 .order_by(EventRow.id.desc()).limit(1))
+            ts = s.scalars(q).first()
+            return _aware(ts) if ts is not None else None
+
+    def abandoned_item_ids(self) -> set[int]:
+        with self._session() as s:
+            q = select(EventRow).where(EventRow.kind == "outcome")
+            return {r.item_id for r in s.scalars(q)
+                    if r.item_id is not None and (r.payload or {}).get("result") == "abandoned"}
 
     # calibration -----------------------------------------------------------
     def calibration(self, gate: str, question: str) -> Calibration | None:

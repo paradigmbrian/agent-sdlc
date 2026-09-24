@@ -1,10 +1,11 @@
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
 from agent_sdlc.store import LabelInput, Store
-from agent_sdlc.types import Calibration, Decision, ParkReason, Stage, Usage, WorkItem
+from agent_sdlc.types import Calibration, Decision, EventInput, ParkReason, Stage, Usage, WorkItem
+from tests.fakes import decision
 
 WI = WorkItem(1, "Fix login", "desc", "ac", "Bug", ("agent",), "https://x/1")
 
@@ -100,3 +101,55 @@ def test_i4_usage_cache_reads_roundtrip_and_old_dicts_load() -> None:
     assert U.from_dict(u.to_dict()) == u and u.tokens == 5
     assert U.from_dict({"turns": 1, "input_tokens": 2, "output_tokens": 3}) == U(1, 2, 3, 0)
     assert (u + u).cache_read_tokens == 8
+
+
+def test_events_round_trip_order_and_context(store: Store) -> None:
+    store.add_item("t", WI, "b")
+    it = store.get(WI.id)
+    store.add_event("intake", {"branch": "b"}, item=it)
+    store.add_event("pause")
+    new = replace(it, stage=Stage.PLAN)
+    store.commit_step(new, [], Usage(), date(2026, 10, 1), [],
+                      events=[EventInput("transition", {"from": "triage", "to": "plan"})], at=it)
+    evs = store.events_for(WI.id)
+    assert [e.kind for e in evs] == ["intake", "transition"]
+    assert evs[1].stage == "triage" and evs[1].attempt == 0 and evs[1].payload["to"] == "plan"
+    assert evs[1].ts.tzinfo is not None
+    assert store.get(WI.id).stage is Stage.PLAN
+    start = evs[0].ts - timedelta(seconds=1)
+    assert [e.kind for e in store.events_since(start)] == ["intake", "pause", "transition"]
+    assert [e.kind for e in store.events_since(start, kinds=["pause"])] == ["pause"]
+    assert store.last_event_ts(WI.id) == evs[1].ts
+
+
+def test_events_since_excludes_older_and_save_writes_events(store: Store) -> None:
+    store.add_item("t", WI, "b")
+    it = store.get(WI.id)
+    old = datetime(2026, 1, 1, tzinfo=UTC)
+    store.add_event("intake", {}, item=it, ts=old)
+    store.save(replace(it, attempt=1), events=[EventInput("infra_failure", {"n": 1})], at=it)
+    assert [e.kind for e in store.events_since(old + timedelta(days=1))] == ["infra_failure"]
+    assert store.events_for(WI.id)[0].ts == old
+    assert store.get(WI.id).attempt == 1
+    assert store.last_event_ts(999) is None
+
+
+def test_label_queries_for_metrics_and_abandoned(store: Store) -> None:
+    store.add_item("t", WI, "b")
+    it = store.get(WI.id)
+    d1 = decision("review", "review_blocking", "no")
+    d2 = decision("review", "risk", "low")
+    store.commit_step(it, [(d1, {"review_notes": "n"}), (d2, {"review_notes": "n"})],
+                      Usage(), date(2026, 10, 1), [])
+    [(first_id, _, _)] = store.unlabeled_decisions("review", 1)
+    store.add_label(LabelInput("review", "review_blocking", d1.raw_probs, "false", "manual",
+                               first_id))
+    assert store.labeled_decisions("review", "review_blocking") == [("no", "false")]
+    store.add_event("outcome", {"result": "abandoned"}, item=it)
+    assert store.abandoned_item_ids() == {WI.id}
+    rows = store.unlabeled_decisions_for_items("review", {WI.id}, 10)
+    assert [(item_id, d.question) for _, item_id, d, _ in rows] == [(WI.id, "risk")]
+    assert store.unlabeled_decisions_for_items("review", set(), 10) == []
+    assert store.decision_states(WI.id, "review")[0] == {"review_notes": "n"}
+    assert [d.question for _, d in store.decisions_with_ts(WI.id)] == [
+        "review_blocking", "risk"]
