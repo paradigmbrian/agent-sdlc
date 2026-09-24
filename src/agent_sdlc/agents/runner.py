@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -227,12 +228,19 @@ class ClaudeAgentRunner:
             denials.append(denial)
             writer.denied(denial)
             log.warning("denied %s %s [%s]: %s", role.name, tool, denial.category, denial.reason)
+            newly_escalated = False
             if escalated is None:
                 if denial.category in ESCALATE_CATEGORIES:
                     escalated = denial.category
+                    newly_escalated = True
                 elif len(denials) >= self._max_denials:
                     escalated = "denial_threshold"
-            return cast(SyncHookJSONOutput, _deny(denial.reason))
+                    newly_escalated = True
+            output = _deny(denial.reason)
+            if newly_escalated:
+                output["continue_"] = False
+                output["stopReason"] = f"agent-sdlc stopped the session: {escalated}"
+            return cast(SyncHookJSONOutput, output)
 
         options = ClaudeAgentOptions(  # unchanged from before
             system_prompt=role.system_prompt,
@@ -287,9 +295,12 @@ class ClaudeAgentRunner:
                             if escalated is not None and not stopping:
                                 stopping = True
                                 log.warning("stopping %s session: %s", role.name, escalated)
-                                await client.interrupt()
                                 window.reschedule(
                                     asyncio.get_running_loop().time() + _INTERRUPT_GRACE_S)
+                                try:
+                                    await client.interrupt()
+                                except Exception as e:
+                                    log.warning("interrupt failed for %s: %s", role.name, e)
                 except TimeoutError:
                     if not stopping:
                         raise
@@ -302,15 +313,14 @@ class ClaudeAgentRunner:
             if isinstance(e, ClaudeSDKError):
                 raise AgentInfraError(f"{role.name}: {type(e).__name__}: {e}",
                                       partial=partial()) from e
+            if escalated is not None:
+                return replace(partial(), text=texts[-1].strip() if texts else "")
             raise
         finally:
             writer.close()
         if result is None:
             if escalated is not None:
-                return AgentResult(texts[-1].strip() if texts else "", _estimate(per_message),
-                                   tuple(denials), escalated=escalated, trace=writer.path,
-                                   trace_error=writer.error, role=role.name,
-                                   usage_estimated=True)
+                return replace(partial(), text=texts[-1].strip() if texts else "")
             raise AgentInfraError(f"{role.name}: agent session ended without a result",
                                   partial=partial())
         text = (getattr(result, "result", None) or (texts[-1] if texts else "")).strip()

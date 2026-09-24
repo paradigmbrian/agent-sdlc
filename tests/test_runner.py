@@ -709,3 +709,77 @@ def test_run_infra_error_carries_partial(tmp_path: Path, monkeypatch: pytest.Mon
             IMPLEMENTER, "p", tmp_path, max_turns=5))
     partial = ei.value.partial
     assert partial is not None and partial.role == "implementer" and len(partial.denials) == 1
+
+
+# --- Task 5 fix round 1: interrupt failure keeps escalation; escalating denial stops the CLI ---
+
+
+def test_run_interrupt_failure_keeps_escalation_and_denials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+
+    async def failing_interrupt(self: Any) -> None:
+        raise Exception("Control request timeout: interrupt")
+
+    monkeypatch.setattr(sdk.ClaudeSDKClient, "interrupt", failing_interrupt)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.AssistantMessage([sdk.TextBlock("still going")])]
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "outside_worktree"
+    assert res.denials[0].category == "outside_worktree"
+
+
+def test_run_escalation_first_category_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Bash", {"command": "git push"}),
+               _hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.ResultMessage(num_turns=1, result="r", usage={})]
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, max_denials=1)
+    res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "denial_threshold" and len(res.denials) == 2
+
+
+def test_run_timeout_without_escalation_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = [TimeoutError("stream timed out")]
+    _install_fake_sdk(monkeypatch, captured, script)
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    with pytest.raises(TimeoutError):
+        asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+
+
+def test_pre_tool_use_hook_stops_cli_on_escalating_denial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+
+    async def invoke_hooks(client: Any) -> None:
+        hook = client.options.hooks["PreToolUse"][0].hooks[0]
+        captured["non_escalating"] = await hook(
+            {"tool_name": "Bash", "tool_input": {"command": "git push"}}, "tu1", None)
+        captured["escalating"] = await hook(
+            {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, "tu2", None)
+
+    script.append(invoke_hooks)
+    script.append(sdk.ResultMessage(num_turns=1, result="r", usage={}))
+
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
+
+    assert "continue_" not in captured["non_escalating"]
+    assert "stopReason" not in captured["non_escalating"]
+    assert captured["escalating"]["continue_"] is False
+    assert (captured["escalating"]["stopReason"]
+            == "agent-sdlc stopped the session: outside_worktree")
