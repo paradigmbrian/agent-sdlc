@@ -237,6 +237,13 @@ class ClaudeAgentRunner:
         async def pre_tool_use(input_data: HookInput, tool_use_id: str | None,
                                context: HookContext) -> SyncHookJSONOutput:
             nonlocal escalated
+            if escalated is not None:
+                # A consequence, not a new probe (F3): don't record it as a denial or write it
+                # to the transcript, just keep the session stopped.
+                output = _deny(f"session stopped after escalation: {escalated}")
+                output["continue_"] = False
+                output["stopReason"] = f"agent-sdlc stopped the session: {escalated}"
+                return cast(SyncHookJSONOutput, output)
             # input_data is a TypedDict union; only PreToolUse events reach this matcher, and
             # PreToolUseHookInput carries tool_name/tool_input, so a plain dict view is safe here.
             data = cast(dict[str, Any], input_data)
@@ -359,8 +366,9 @@ class ClaudeAgentRunner:
             output_tokens=int(u.get("output_tokens", 0)),
             cache_read_tokens=int(u.get("cache_read_input_tokens", 0)),
         )
-        if result.is_error and (getattr(result, "api_error_status", None) == 429
-                                or parse_usage_limit(text)):
+        if (result.is_error and escalated is None
+                and (getattr(result, "api_error_status", None) == 429
+                    or parse_usage_limit(text))):
             raise UsageLimitError(text, reset_at or _reset_from_text(text), usage,
                                   partial=partial(usage))
         error = str(getattr(result, "subtype", "") or "error") if result.is_error else ""

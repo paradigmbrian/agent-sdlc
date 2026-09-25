@@ -327,7 +327,7 @@ def test_run_pre_tool_use_hook_denies_and_allows(
     async def invoke_hooks(client: Any) -> None:
         hook = client.options.hooks["PreToolUse"][0].hooks[0]
         captured["deny_output"] = await hook(
-            {"tool_name": "Write", "tool_input": {"file_path": "infra/x"}}, "tu1", None)
+            {"tool_name": "Bash", "tool_input": {"command": "git push"}}, "tu1", None)
         captured["allow_output"] = await hook(
             {"tool_name": "Write", "tool_input": {"file_path": "src/a.ts"}}, "tu2", None)
 
@@ -339,7 +339,36 @@ def test_run_pre_tool_use_hook_denies_and_allows(
 
     assert captured["deny_output"]["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert captured["allow_output"] == {}
-    assert any("protected path: infra/x" in d for d in result.denied)
+    assert any("command not allowlisted: git" in d for d in result.denied)
+
+
+def test_f3_denies_every_call_after_escalation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+
+    async def invoke_hooks(client: Any) -> None:
+        hook = client.options.hooks["PreToolUse"][0].hooks[0]
+        captured["escalating"] = await hook(
+            {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}, "tu1", None)
+        captured["after"] = await hook(
+            {"tool_name": "Write", "tool_input": {"file_path": "src/a.ts"}}, "tu2", None)
+
+    script.append(invoke_hooks)
+    script.append(sdk.ResultMessage(is_error=False, num_turns=1, result="ok", usage={}))
+
+    runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {})
+    result = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=2))
+
+    after = captured["after"]
+    assert after["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "session stopped after escalation: outside_worktree" in (
+        after["hookSpecificOutput"]["permissionDecisionReason"])
+    assert after["continue_"] is False
+    assert after["stopReason"] == "agent-sdlc stopped the session: outside_worktree"
+    assert len(result.denials) == 1
 
 
 def test_run_is_error_with_usage_limit_text_raises(
@@ -746,7 +775,9 @@ def test_run_escalation_first_category_wins(
                sdk.ResultMessage(num_turns=1, result="r", usage={})]
     runner = ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}, max_denials=1)
     res = asyncio.run(runner.run(IMPLEMENTER, "p", tmp_path, max_turns=5))
-    assert res.escalated == "denial_threshold" and len(res.denials) == 2
+    # F3: the second call arrives after the first already escalated, so it's denied outright
+    # and never evaluated or recorded — "first category wins" trivially, but note the count.
+    assert res.escalated == "denial_threshold" and len(res.denials) == 1
 
 
 def test_run_timeout_without_escalation_propagates(
@@ -832,6 +863,20 @@ def test_i1_sdk_error_after_escalation_returns_escalated(
     res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
         IMPLEMENTER, "p", tmp_path, max_turns=5))
     assert res.escalated == "outside_worktree" and len(res.denials) == 1
+
+
+def test_f2_usage_limit_after_escalation_returns_escalated_not_raise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+    script: list[Any] = []
+    sdk = _install_fake_sdk(monkeypatch, captured, script)
+    script += [_hook_call("Read", {"file_path": "/etc/hosts"}),
+               sdk.ResultMessage(is_error=True, num_turns=2,
+                                 result="usage limit reached|1760000000", usage={})]
+    res = asyncio.run(ClaudeAgentRunner(PP, CP, tmp_path / "cfg", {}).run(
+        IMPLEMENTER, "p", tmp_path, max_turns=5))
+    assert res.escalated == "outside_worktree"
 
 
 def test_i4_should_stop_after_escalation_returns_escalated(
