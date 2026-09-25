@@ -86,6 +86,22 @@ def test_status_shows_last_tick_and_stale(db: str, capsys: pytest.CaptureFixture
     assert "denied 2" in out and "STALE" in out
 
 
+def test_f4_status_marks_queued_item_instead_of_stale(
+    db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    store = Store(db)
+    now = datetime.now(UTC)
+    for i in (9, 10):
+        store.add_item("rallysource", WorkItem(i, "Fix it", "", "", "Bug", (), "u"), f"b{i}")
+        store.save(replace(store.get(i), stage=Stage.PLAN))
+        store.add_event("intake", {}, item=store.get(i), ts=now - timedelta(hours=3))
+    assert run(db, "status") == 0
+    out = capsys.readouterr().out
+    lines = {line.split()[0]: line for line in out.splitlines() if line.startswith("#")}
+    assert "STALE" in lines["#9"] and "STALE" not in lines["#10"]
+    assert "queued" in lines["#10"] and "queued" not in lines["#9"]
+
+
 def test_pause_and_local_requeue_write_events(db: str) -> None:
     assert run(db, "pause") == 0
     store = Store(db)

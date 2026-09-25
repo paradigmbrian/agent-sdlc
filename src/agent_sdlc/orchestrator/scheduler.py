@@ -58,6 +58,12 @@ def _partial_events(partial: object) -> list[EventInput]:
     return agent_events(partial) if isinstance(partial, AgentResult) else []
 
 
+def in_flight(items: list[Item], limit: int) -> list[Item]:
+    """The active items the scheduler works on this tick, in its order."""
+    ordered = sorted(items, key=lambda i: i.stage is Stage.TRIAGE)
+    return ordered[:limit]
+
+
 class Scheduler:
     def __init__(self, *, target: TargetConfig, store: Store, executor: Executor, ado: AdoPort,
                  workspaces: WorkspacePort, clock: Callable[[], datetime] | None = None) -> None:
@@ -102,16 +108,18 @@ class Scheduler:
             await self._step(item, now)
         if not self._agent_work_allowed(now):
             return
-        active = self._store.items(self._t.name, ACTIVE_STAGES)
-        active.sort(key=lambda i: i.stage is Stage.TRIAGE)  # in-flight work first (stable)
-        for item in active[: self._t.limits.max_concurrent_items]:
+        active = in_flight(self._store.items(self._t.name, ACTIVE_STAGES),
+                           self._t.limits.max_concurrent_items)
+        for item in active:
             if self._paused(self._clock()):
                 return
             await self._step(item, now)
 
     def _warn_stale(self, now: datetime) -> None:
         limit = timedelta(minutes=self._t.limits.stale_after_minutes)
-        for item in self._store.items(self._t.name, ACTIVE_STAGES):
+        active = in_flight(self._store.items(self._t.name, ACTIVE_STAGES),
+                           self._t.limits.max_concurrent_items)
+        for item in active:
             last = self._store.last_event_ts(item.id)
             if last is not None and now - last > limit:
                 with log_context(item.id, item.stage.value):
@@ -204,9 +212,12 @@ class Scheduler:
             log.warning("usage limit hit; pausing until %s", until)
             return
         except AgentInterrupted as e:
-            # Keep the interrupted session's denials and usage; item state is unchanged (I4).
-            if events := _partial_events(e.partial):
-                self._store.save(item, events=events, at=item)
+            # Keep the interrupted session's denials and count its usage; the item's stage is
+            # unchanged (I4, F6).
+            if e.partial is not None:
+                events = _partial_events(e.partial)
+                self._store.commit_step(replace(item, usage=item.usage + e.partial.usage), [],
+                                        e.partial.usage, now.date(), [], events=events, at=item)
             return
         except (*_INFRA_ERRORS, AgentInfraError) as e:
             self._infra_failure(item, now, e)

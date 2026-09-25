@@ -520,3 +520,32 @@ async def test_i5_busy_flag_set_during_step_and_cleared_after(  # type: ignore[n
     await sched(env, Spy()).tick()
     assert seen == [f"5|triage|{NOW.isoformat()}"]
     assert store.get_flag("busy") is None
+
+
+# --- follow-up fix wave: F4 queued items are not stale, F6 kill switch counts tokens ---
+
+
+async def test_f4_stale_warns_only_for_in_flight_item(  # type: ignore[no-untyped-def]
+    env, caplog: pytest.LogCaptureFixture
+) -> None:
+    store, ado, ws, target = env
+    for i in (5, 6):
+        store.add_item("fixture", replace(WI, id=i), f"agent/{i}-x")
+        store.save(replace(store.get(i), stage=Stage.PLAN))
+        store.add_event("intake", {}, item=store.get(i), ts=NOW - timedelta(hours=3))
+    with caplog.at_level(logging.WARNING):
+        await sched(env, ScriptedExecutor(StepResult(Transition(Stage.PLAN)))).tick()
+    stale_records = [r for r in caplog.records if "stale" in r.getMessage()]
+    assert len(stale_records) == 1
+
+
+async def test_f6_kill_switch_counts_partial_usage(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    partial = AgentResult("", Usage(2, 100, 50), role="planner")
+    err = AgentInterrupted("x", partial=partial)
+    await sched(env, ScriptedExecutor(err)).tick()
+    item = store.get(5)
+    assert item.usage.tokens == 150
+    assert item.stage is Stage.TRIAGE
+    assert store.daily_usage(NOW.date()).turns == 2
+    assert store.daily_usage(NOW.date()).tokens == 150

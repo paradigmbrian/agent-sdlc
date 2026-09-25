@@ -11,6 +11,7 @@ from agent_sdlc.decisions.gates import GATES
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
 from agent_sdlc.logctx import configure_logging
 from agent_sdlc.metrics import render_metrics
+from agent_sdlc.orchestrator.scheduler import in_flight
 from agent_sdlc.orchestrator.transitions import requeue
 from agent_sdlc.store import Store
 from agent_sdlc.targets import TargetConfig, load_target
@@ -143,6 +144,8 @@ def _status(target: TargetConfig, store: Store) -> None:
             print(busy_line)
     print(f"today: {today.turns} turns, {today.tokens:,} tokens")
     stale_after = timedelta(minutes=target.limits.stale_after_minutes)
+    busy_ids = {i.id for i in in_flight(store.items(target.name, ACTIVE_STAGES),
+                                        target.limits.max_concurrent_items)}
     for i in store.items(target.name):
         reason = f" ({i.park_reason.value} from {i.parked_from.value})" \
             if i.park_reason and i.parked_from else ""
@@ -150,10 +153,15 @@ def _status(target: TargetConfig, store: Store) -> None:
         last = store.last_event_ts(i.id)
         seen = f"last {_ago(now - last)} ago" if last else "no events"
         denied = sum((i.data.get("denial_counts") or {}).values())
-        stale = " STALE" if last and i.stage in ACTIVE_STAGES and now - last > stale_after \
-            else ""
+        active_stale = last and i.stage in ACTIVE_STAGES and now - last > stale_after
+        if active_stale and i.id in busy_ids:
+            status = " STALE"
+        elif active_stale:
+            status = " queued"
+        else:
+            status = ""
         print(f"#{i.id:<6} {i.stage.value:<15}{reason}{pr}  attempt {i.attempt}  "
-              f"{i.usage.tokens:,} tok  {seen}  denied {denied}{stale}  {i.title[:60]}")
+              f"{i.usage.tokens:,} tok  {seen}  denied {denied}{status}  {i.title[:60]}")
 
 
 def main(argv: list[str] | None = None) -> int:
