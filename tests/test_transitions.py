@@ -172,6 +172,12 @@ def test_c1_requeue_drops_parked_tag_set() -> None:
     assert "parked_tag_set" not in requeue(parked).data
 
 
+def test_f5_requeue_drops_last_denials() -> None:
+    parked = apply_transition(ITEM, park(ParkReason.NEEDS_HUMAN, "unclear"))
+    parked = replace(parked, data={**parked.data, "last_denials": [{"tool": "Read"}]})
+    assert "last_denials" not in requeue(parked).data
+
+
 @pytest.mark.parametrize("stage", [Stage.PLAN, Stage.IMPLEMENT, Stage.REVIEW])
 def test_agent_error_park_is_not_a_gate_and_requeue_retries_stage(stage: Stage) -> None:
     from agent_sdlc.orchestrator.transitions import after_agent_error

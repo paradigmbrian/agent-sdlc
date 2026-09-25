@@ -149,8 +149,7 @@ class StageExecutor:
         counts[res.role] = counts.get(res.role, 0) + len(new)
         kept = list(item.data.get("denials") or [])
         kept += new[: max(0, _KEPT_DENIALS - len(kept))]
-        return {"denial_counts": counts, "denials": kept,
-                "last_denials": new[-_PARK_DENIALS:]}
+        return {"denial_counts": counts, "denials": kept}
 
     def _stopped(self, res: AgentResult, events: list[EventInput],
                  data: dict[str, Any]) -> StepResult | None:
@@ -168,6 +167,7 @@ class StageExecutor:
             t = park(ParkReason.POLICY,
                      f"The {res.role} agent was stopped after blocked tool calls "
                      f"({res.escalated}):\n{quoted}")
+        data = {**data, "last_denials": _denial_dicts(res)[-_PARK_DENIALS:]}
         return StepResult(t, res.usage, events=events, data=data)
 
     def _agent_failed(self, item: Item, res: AgentResult, events: list[EventInput],
@@ -204,12 +204,16 @@ class StageExecutor:
         if digest == item.data.get("manifest_approved"):
             return None
         log.warning("unapproved manifest change: %s", ", ".join(files))
-        # Full hunks for manifests, only a stat for lockfiles, so a large lockfile change cannot
-        # push the package.json change out of the approval diff (I3).
+        # Full hunks for manifests, only a stat for lockfiles when both changed, so a large
+        # lockfile change cannot push the package.json change out of the approval diff (I3).
+        # A lockfile-only change gets its own full diff (F1): a stat alone hides what changed.
         locks = [f for f in files if f.endswith(_LOCKFILES)]
         manifests = [f for f in files if f not in locks]
-        diff = (self._ws.diff(wt, paths=manifests) if manifests else "") + (
-            self._ws.diff(wt, paths=locks, stat=True) if locks else "")
+        if manifests:
+            diff = self._ws.diff(wt, paths=manifests) + (
+                self._ws.diff(wt, paths=locks, stat=True) if locks else "")
+        else:
+            diff = self._ws.diff(wt, paths=locks) if locks else ""
         if len(diff) > _MANIFEST_DIFF_CHARS:
             diff = diff[:_MANIFEST_DIFF_CHARS] + "\n…(truncated)"
         return StepResult(

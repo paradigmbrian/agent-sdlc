@@ -258,6 +258,19 @@ async def test_escalated_session_parks_policy(parts) -> None:  # type: ignore[no
     assert res.usage == Usage(1, 5, 5)
 
 
+async def test_f5_non_escalated_denials_have_no_last_denials(  # type: ignore[no-untyped-def]
+    parts
+) -> None:
+    ex, _, ws, _, runner = parts
+    denial = Denial("Bash", "command_not_allowlisted", "command not allowlisted: rm")
+    runner.behaviors["implementer"] = lambda r, p, c: AgentResult(
+        "done", Usage(1, 1, 1), (denial,))
+    ws.create(5, "agent/5-add-feature")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    assert res.data["denial_counts"] == {"implementer": 1}
+    assert "last_denials" not in res.data
+
+
 async def test_budget_escalation_parks_budget(parts) -> None:  # type: ignore[no-untyped-def]
     ex, *_, runner = parts
     runner.behaviors["planner"] = lambda r, p, c: AgentResult(
@@ -456,3 +469,16 @@ async def test_i3_manifest_diff_is_truncated_with_marker(  # type: ignore[no-unt
     res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
     diff = res.data["manifest_diff"]
     assert diff.endswith("\n…(truncated)") and len(diff) == 6000 + len("\n…(truncated)")
+
+
+async def test_f1_lockfile_only_change_shows_full_diff(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, _, ws, _ = _executor(tmp_path, _with_lock_manifests(target), origin_repo)
+    wt = ws.create(5, "agent/5-add-feature")
+    (wt / "package-lock.json").write_text('{"lockfileVersion": 3, "left-pad": "1.0.0"}\n')
+    ws.commit(wt, "deps")
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    diff = res.data["manifest_diff"]
+    assert diff.startswith("diff --git a/package-lock.json b/package-lock.json")
+    assert any(line.startswith("+") and "left-pad" in line for line in diff.splitlines())

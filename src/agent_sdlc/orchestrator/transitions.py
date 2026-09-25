@@ -183,7 +183,8 @@ def requeue(item: Item) -> Item:
     to = _APPROVE_NEXT.get(source, source) if reason in GATE_PARKS else source
     if reason is ParkReason.PR_ROUNDS:
         to = Stage.IMPLEMENT  # apply the change request kept in data["feedback"] (I5)
-    data = {k: v for k, v in item.data.items() if k not in ("park_note", "parked_tag_set")}
+    data = {k: v for k, v in item.data.items()
+            if k not in ("park_note", "parked_tag_set", "last_denials")}
     if reason is ParkReason.BUDGET:
         data["budget_offset"] = item.usage.tokens
     if reason is ParkReason.MANIFEST:
