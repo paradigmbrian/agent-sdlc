@@ -81,7 +81,8 @@ def _label_one(store: Store, gate: str, decision_id: int, d: Decision, state: di
     gold = _ask_gold(ask, d.question, option_keys(GATES[gate][d.question]), d.answer)
     if gold is None:
         return False
-    store.add_label(LabelInput(gate, d.question, d.raw_probs, gold, "manual", decision_id))
+    store.add_label(LabelInput(gate, d.question, d.raw_probs, gold, "manual", decision_id,
+                               target=store.target_for_decision(decision_id)))
     return True
 
 

@@ -333,6 +333,16 @@ class Store:
                  .order_by(DecisionRow.item_id, DecisionRow.id).limit(limit))
             return [(r.id, r.item_id, _to_decision(r), dict(r.state)) for r in s.scalars(q)]
 
+    def target_for_decision(self, decision_id: int) -> str | None:
+        """The target of the item a logged decision belongs to, if any (spec §4.1: every
+        label this system writes must set target)."""
+        with self._session() as s:
+            d = s.get(DecisionRow, decision_id)
+            if d is None or d.item_id is None:
+                return None
+            item = s.get(ItemRow, d.item_id)
+            return item.target if item else None
+
     def decision_states(self, item_id: int, gate: str) -> list[dict[str, Any]]:
         with self._session() as s:
             q = (select(DecisionRow).where(DecisionRow.item_id == item_id,

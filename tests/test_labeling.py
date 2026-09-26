@@ -63,6 +63,20 @@ def test_label_logged_marks_decisions() -> None:
     assert label_logged(store, "review", 10, lambda _p: "true") == 0
 
 
+def test_m3_label_logged_fills_target_from_the_decisions_item() -> None:
+    from datetime import date
+
+    from agent_sdlc.types import Usage
+    from tests.fakes import decision
+    store = Store("sqlite://")
+    store.add_item("triathlon", WorkItem(1, "t", "d", "a", "Bug", (), "u"), "b")
+    store.commit_step(store.get_by_ref("triathlon", 1),
+                      [(decision("review", "review_blocking", "no"), {"n": "x"})],
+                      Usage(), date(2026, 9, 23), [])
+    assert label_logged(store, "review", 10, lambda _p: "true") == 1
+    assert store.label_targets("review", "review_blocking") == ["triathlon"]
+
+
 def test_label_abandoned_only_shows_abandoned_items(capsys: pytest.CaptureFixture[str]) -> None:
     from datetime import date
 
