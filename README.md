@@ -1,10 +1,12 @@
 # agent-sdlc
 
-Local multi-agent development loop: Azure DevOps work items tagged `agent` are triaged by
-[Laya](https://github.com/nandhakishorm/laya), planned/implemented/reviewed by Claude agents,
-verified with the target repo's own commands, and opened as PRs. A human approves every merge.
+Local multi-agent development loop: Azure DevOps work items or GitHub issues tagged `agent` are
+triaged by [Laya](https://github.com/nandhakishorm/laya), planned/implemented/reviewed by Claude
+agents, verified with the target repo's own commands, and opened as PRs. A human approves every
+merge.
 
-Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md`
+Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md` plus
+`docs/superpowers/specs/2026-09-26-multi-forge-design.md` (GitHub and parallel targets).
 
 ## One-time setup (done by a human)
 
@@ -43,32 +45,64 @@ Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md`
    `targets/rallysource.yaml`.
 5. `uv sync`
 
+## Configuration
+
+- `agent-sdlc.yaml` lists the targets and holds settings shared by the one Claude subscription:
+  `auth`, `laya`, daily turn/token caps, `max_concurrent_sessions`, `run_window`.
+- `targets/<name>.yaml` holds one repository: `forge` (`kind: ado` or `kind: github`),
+  `intake` labels, `repo` (base branch, branch prefix, install list, verify commands), `policy`
+  and per-item `limits`.
+- `--config <file>` picks another global config; `--target <file>` runs a single target with
+  default global settings.
+- State lives in `~/.agent-sdlc/agent-sdlc-v2.db`. Items are referenced as `<target>#<id>`
+  (`agent-sdlc trace triathlon#12`); a bare id works when only one target has it.
+
+## GitHub setup (per repository, done by a human)
+
+1. Create a private GitHub App on the `paradigmbrian` account: webhook disabled; repository
+   permissions Contents: read & write, Issues: read & write, Pull requests: read & write,
+   Metadata: read. Install it on the target repo only. Note the App id.
+2. Generate a private key and store it:
+   `security add-generic-password -s agent-sdlc-github-app-<app_id> -a $USER -T <resolved interpreter path> -w "$(cat <key>.pem)"`,
+   then delete the `.pem` (or export `AGENT_SDLC_GITHUB_APP_KEY` in the launching shell).
+3. Add a branch ruleset on `main`: require a pull request with 1 approval, block force pushes and
+   deletion, no bypass for the App.
+4. Create the labels `agent` and `agent:parked` on the repo.
+5. Pilot check: in a clean clone of `main` with no `.env` and no running Postgres, confirm the
+   install list and every command in `targets/triathlon.yaml` pass (db-marked tests skip). Narrow
+   any command that fails for environmental reasons.
+6. Fill `app_id` in `targets/triathlon.yaml`, then uncomment `targets/triathlon.yaml` in
+   `agent-sdlc.yaml` (it ships commented out so the loop does not retry an unconfigured target).
+
 ## Everyday use
 
 ```bash
 uv run agent-sdlc status
+uv run agent-sdlc status --target-name triathlon
 uv run agent-sdlc run --once --dry-run-push   # full pipeline, no push, prints PR body
 uv run agent-sdlc run                         # loop (polls every 60s)
 uv run agent-sdlc pause | resume              # kill switch
-uv run agent-sdlc requeue <id>                # same as removing the agent:parked tag
-uv run agent-sdlc trace <id> [--full]          # timeline: transitions, sessions, denials, checks
+uv run agent-sdlc pause --target-name triathlon
+uv run agent-sdlc requeue <target>#<id>       # same as removing the agent:parked tag
+uv run agent-sdlc trace <target>#<id> [--full] # timeline: transitions, sessions, denials, checks
 uv run agent-sdlc metrics [--days 30]          # outcomes, parks, effort, latency, denials, gates
 ```
 
-Opt a work item in by adding the `agent` tag. Parked items get a comment and the `agent:parked`
-tag; removing the tag approves proceeding past a gate park or retries a failed stage. On a PR,
-start a comment with `/agent` to request a revision.
+Opt an item in by adding the `agent` tag (ADO) or label (GitHub). Parked items get a comment and
+the `agent:parked` tag; removing the tag approves proceeding past a gate park or retries a failed
+stage. On a PR, start a comment with `/agent` to request a revision; on GitHub a "Request changes"
+review also counts.
 
 `status` also shows when the loop last ticked (`LOOP NOT RUNNING?` after 3 missed polls) and
 marks items with no event for `limits.stale_after_minutes` as `STALE`.
 
 ### Traces and logs
 
-- `~/.agent-sdlc/traces/<id>/` holds one JSONL transcript per agent session (every tool call,
-  result and blocked call) and the full output of every install/verify command. Files are
+- `~/.agent-sdlc/traces/<target>/<id>/` holds one JSONL transcript per agent session (every tool
+  call, result and blocked call) and the full output of every install/verify command. Files are
   `0600`. Override with `--traces` or `AGENT_SDLC_TRACES`.
 - `~/.agent-sdlc/logs/agent-sdlc.log` is the rotating log (14 days), each line tagged
-  `[#<id> <stage>]`. Override with `--logs` or `AGENT_SDLC_LOGS`.
+  `[<target>#<id> <stage>]`. Override with `--logs` or `AGENT_SDLC_LOGS`.
 
 ### Parks you will see from the guardrails
 

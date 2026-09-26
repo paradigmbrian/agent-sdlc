@@ -142,3 +142,26 @@ def test_rallysource_protects_tooling_config_but_not_app_config() -> None:
 def test_policy_rejects_path_both_protected_and_manifest() -> None:
     with pytest.raises(ValidationError):
         PolicyConfig(protected_paths=["**/package.json"], manifest_paths=["**/package.json"])
+
+
+def test_triathlon_target() -> None:
+    t = load_target(ROOT / "targets" / "triathlon.yaml")
+    assert isinstance(t.forge, GitHubForgeConfig)
+    assert (t.forge.owner, t.forge.repo) == ("paradigmbrian", "triathlon-agent")
+    assert t.repo.base_branch == "main"
+    assert t.repo.install == ["uv sync --all-packages", "npm ci --prefix web"]
+    assert t.clone_url == "https://github.com/paradigmbrian/triathlon-agent.git"
+    pp = PathPolicy(t.policy.protected_paths)
+    for p in ["migrations/007_x.sql", ".env", "packages/tri-core/.env.local",
+              "docker-compose.yml", "setup.sh", "conftest.py", ".claude/settings.local.json",
+              ".github/workflows/ci.yml", "web/vite.config.ts", "web/eslint.config.js",
+              "web/playwright.config.ts", "web/tsconfig.app.json"]:
+        assert pp.is_protected(p), p
+    for p in ["packages/tri-core/tests/conftest.py", "packages/tri-core/src/tri_core/db.py",
+              "web/src/App.tsx", "web/tests/app.test.tsx"]:
+        assert not pp.is_protected(p), p
+    mp = PathPolicy(t.policy.manifest_paths)
+    assert mp.violations(["pyproject.toml", "packages/tri-web/pyproject.toml", "uv.lock",
+                          "web/package.json", "web/package-lock.json", "web/src/a.ts"]) == [
+        "packages/tri-web/pyproject.toml", "pyproject.toml", "uv.lock",
+        "web/package-lock.json", "web/package.json"]

@@ -1,0 +1,53 @@
+name: triathlon
+forge:
+  kind: github
+  owner: paradigmbrian
+  repo: triathlon-agent
+  app_id: null                  # set to the GitHub App id (README: GitHub setup)
+  installation_id: null         # null: looked up from the repo
+intake:
+  label: agent
+  parked_label: "agent:parked"
+repo:
+  base_branch: main
+  branch_prefix: agent/
+  install:
+    - uv sync --all-packages
+    - npm ci --prefix web
+  commands:
+    test: uv run pytest
+    lint: uv run ruff check .
+    typecheck: uv run mypy
+    web_lint: npm run lint --prefix web
+    web_test: npm run test --prefix web
+    web_build: npm run build --prefix web
+  command_timeout_s: 1200
+  env_template: null
+policy:
+  protected_paths:
+    - "migrations/**"
+    - ".env*"
+    - "**/.env*"
+    - "docker-compose.yml"
+    - "setup.sh"
+    - "conftest.py"             # root pytest config; package conftests are test code
+    - ".claude/**"
+    - ".github/**"
+    - "web/*.config.*"          # vite, eslint, playwright
+    - "web/tsconfig*.json"
+    - "**/*.pem"
+    - "**/*.key"
+  manifest_paths:
+    - "**/pyproject.toml"
+    - "uv.lock"
+    - "web/package.json"
+    - "web/package-lock.json"
+  max_diff_lines: 600
+limits:
+  max_concurrent_items: 1
+  max_verify_retries: 3
+  max_pr_rounds: 3
+  max_turns: {plan: 30, implement: 80, review: 30}
+  max_item_tokens: 2000000
+  max_denials_per_session: 5
+  stale_after_minutes: 120

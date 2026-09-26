@@ -2,6 +2,7 @@
 # Per-repo settings live in each target file (spec 2026-09-26 §2).
 targets:
   - targets/rallysource.yaml
+  # - targets/triathlon.yaml    # enable after the GitHub setup in README.md
 auth:
   mode: subscription            # subscription | api_key
 laya:
