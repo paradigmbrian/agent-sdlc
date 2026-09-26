@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
@@ -26,6 +27,7 @@ from agent_sdlc.orchestrator.reporting import (
     pr_body,
     pr_title,
 )
+from agent_sdlc.orchestrator.slots import SessionSlots
 from agent_sdlc.orchestrator.transitions import (
     CommentOutcome,
     Transition,
@@ -94,7 +96,9 @@ class StageExecutor:
                  runner: AgentRunner, workspaces: WorkspacePort, path_policy: PathPolicy,
                  decisions_for: Callable[[int], list[Decision]],
                  traces: Path | None = None,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None,
+                 slots: SessionSlots | None = None,
+                 should_stop: Callable[[], bool] = lambda: False) -> None:
         self._t = target
         self._forge = forge
         self._decider = decider
@@ -105,6 +109,8 @@ class StageExecutor:
         self._decisions_for = decisions_for
         self._traces = traces
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._slots = slots
+        self._should_stop = should_stop
 
     async def run(self, item: Item) -> StepResult:
         handlers = {
@@ -129,9 +135,12 @@ class StageExecutor:
                          stage: str) -> tuple[AgentResult, list[EventInput], dict[str, Any]]:
         spent = item.usage.tokens - int(item.data.get("budget_offset", 0))
         budget = max(self._t.limits.max_item_tokens - spent, 0)
-        res = await self._runner.run(role, prompt, wt, self._turns(stage),
-                                     trace=self._trace_path(item, role.name, "jsonl"),
-                                     token_budget=budget)
+        hold = (self._slots.hold(self._should_stop) if self._slots is not None
+               else contextlib.nullcontext())
+        with hold:
+            res = await self._runner.run(role, prompt, wt, self._turns(stage),
+                                         trace=self._trace_path(item, role.name, "jsonl"),
+                                         token_budget=budget)
         res = replace(res, role=role.name)
         log.info("agent %s: %s turns, %s tokens, %s denied%s", role.name, res.usage.turns,
                  f"{res.usage.tokens:,}", len(res.denials),

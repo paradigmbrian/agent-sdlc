@@ -75,7 +75,7 @@ def test_trace_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
 def test_status_shows_last_tick_and_stale(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     store = Store(db)
     now = datetime.now(UTC)
-    store.set_flag("last_tick", (now - timedelta(minutes=10)).isoformat())
+    store.set_flag("last_tick:rallysource", (now - timedelta(minutes=10)).isoformat())
     store.add_item("rallysource", WorkItem(9, "Fix it", "", "", "Bug", (), "u"), "b")
     item = store.get_by_ref("rallysource", 9)
     store.save(replace(item, stage=Stage.PLAN, data={"denial_counts": {"planner": 2}}))
@@ -133,8 +133,8 @@ def test_metrics_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
 def test_status_busy_suppresses_loop_warning(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     store = Store(db)
     since = datetime.now(UTC) - timedelta(minutes=10)
-    store.set_flag("last_tick", since.isoformat())
-    store.set_flag("busy", f"9|implement|{since.isoformat()}")
+    store.set_flag("last_tick:rallysource", since.isoformat())
+    store.set_flag("busy:rallysource", f"9|implement|{since.isoformat()}")
     assert run(db, "status") == 0
     out = capsys.readouterr().out
     assert "busy: #9 implement for 10m" in out
@@ -146,8 +146,18 @@ def test_status_busy_past_stale_limit_is_stuck(
 ) -> None:
     store = Store(db)
     since = datetime.now(UTC) - timedelta(hours=3)
-    store.set_flag("last_tick", since.isoformat())
-    store.set_flag("busy", f"9|implement|{since.isoformat()}")
+    store.set_flag("last_tick:rallysource", since.isoformat())
+    store.set_flag("busy:rallysource", f"9|implement|{since.isoformat()}")
     assert run(db, "status") == 0
     out = capsys.readouterr().out
     assert "busy: #9 implement for 3h  STUCK?" in out and "LOOP NOT RUNNING?" in out
+
+
+def test_pause_one_target(db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(db, "pause", "--target-name", "rallysource") == 0
+    store = Store(db)
+    assert store.get_flag("paused:rallysource") == "1" and store.get_flag("paused") is None
+    assert run(db, "resume") == 0                       # global resume leaves it paused
+    assert Store(db).get_flag("paused:rallysource") == "1"
+    assert run(db, "resume", "--target-name", "rallysource") == 0
+    assert Store(db).get_flag("paused:rallysource") is None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -69,6 +70,11 @@ def _ref(item: Item) -> str:
     return f"{item.target}#{item.external_id}"
 
 
+def stop_requested(store: Store, target: str) -> bool:
+    """The global kill switch or this target's pause (spec §5.2)."""
+    return store.get_flag("paused") == "1" or store.get_flag(f"paused:{target}") == "1"
+
+
 class Scheduler:
     def __init__(self, *, target: TargetConfig, store: Store, executor: Executor,
                  forge: ForgePort, workspaces: WorkspacePort,
@@ -83,16 +89,20 @@ class Scheduler:
         self._limits = limits or GlobalLimits()
 
     # loop ------------------------------------------------------------------
-    async def run_forever(self, poll_s: int = 60) -> None:
-        while True:
+    async def run_forever(self, poll_s: int = 60,
+                          stop: threading.Event | None = None) -> None:
+        while stop is None or not stop.is_set():
             try:
                 await self.tick()
             except Exception:
                 log.exception("tick failed")
-            await asyncio.sleep(poll_s)
+            if stop is None:
+                await asyncio.sleep(poll_s)
+            else:
+                await asyncio.to_thread(stop.wait, poll_s)
 
     def _paused(self, now: datetime) -> bool:
-        if self._store.get_flag("paused") == "1":
+        if stop_requested(self._store, self._t.name):
             return True
         until = self._store.get_flag("paused_until")
         return bool(until and datetime.fromisoformat(until) > now)
@@ -106,7 +116,7 @@ class Scheduler:
 
     async def tick(self) -> None:
         now = self._clock()
-        self._store.set_flag("last_tick", now.isoformat())
+        self._store.set_flag(f"last_tick:{self._t.name}", now.isoformat())
         if self._paused(now):
             return
         self._intake()
@@ -197,12 +207,13 @@ class Scheduler:
     # one step --------------------------------------------------------------
     async def _step(self, item: Item, now: datetime) -> None:
         # Lets `status` tell a long step from a dead loop (I5).
-        self._store.set_flag("busy", f"{item.external_id}|{item.stage.value}|{now.isoformat()}")
+        self._store.set_flag(f"busy:{self._t.name}",
+                             f"{item.external_id}|{item.stage.value}|{now.isoformat()}")
         try:
             with log_context(_ref(item), item.stage.value):
                 await self._run_step(item, now)
         finally:
-            self._store.set_flag("busy", None)
+            self._store.set_flag(f"busy:{self._t.name}", None)
 
     async def _run_step(self, item: Item, now: datetime) -> None:
         retry_after = item.data.get("retry_after")

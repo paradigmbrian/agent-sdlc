@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any, Protocol
 
 from agent_sdlc.decisions.calibration import apply_temperature
 from agent_sdlc.decisions.gates import GATES, option_keys
+from agent_sdlc.ports import DeciderPort
 from agent_sdlc.types import Calibration, Decision
 
 _DIST_KEYS = ("probabilities", "distribution", "probs")
@@ -91,3 +93,15 @@ class Decider:
             cal = self._calibrations(gate, qid) or self._default
             out[qid] = interpret(gate, qid, qdef, normalize_answer(qdef, answers[qid]), cal)
         return out
+
+
+class LockedDecider:
+    """One Laya model shared by every target thread; predict is not thread-safe (spec §5.2)."""
+
+    def __init__(self, inner: DeciderPort) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+
+    def decide(self, gate: str, state: dict[str, Any]) -> dict[str, Decision]:
+        with self._lock:
+            return self._inner.decide(gate, state)

@@ -439,7 +439,7 @@ async def test_step_writes_intake_step_and_transition_events(env) -> None:  # ty
     evs = store.events_for(_it(store).id)
     assert [e.kind for e in evs] == ["intake", "agent_session", "transition"]
     assert evs[-1].stage == "triage" and evs[-1].payload["to"] == "plan"
-    assert store.get_flag("last_tick") == NOW.isoformat()
+    assert store.get_flag("last_tick:fixture") == NOW.isoformat()
 
 
 async def test_awaiting_noop_poll_writes_no_events(env) -> None:  # type: ignore[no-untyped-def]
@@ -521,12 +521,12 @@ async def test_i5_busy_flag_set_during_step_and_cleared_after(  # type: ignore[n
 
     class Spy:
         async def run(self, item: Item) -> StepResult:
-            seen.append(store.get_flag("busy"))
+            seen.append(store.get_flag("busy:fixture"))
             return StepResult(Transition(Stage.PLAN))
 
     await sched(env, Spy()).tick()
     assert seen == [f"5|triage|{NOW.isoformat()}"]
-    assert store.get_flag("busy") is None
+    assert store.get_flag("busy:fixture") is None
 
 
 # --- follow-up fix wave: F4 queued items are not stale, F6 kill switch counts tokens ---
@@ -556,3 +556,43 @@ async def test_f6_kill_switch_counts_partial_usage(env) -> None:  # type: ignore
     assert item.stage is Stage.TRIAGE
     assert store.daily_usage(NOW.date()).turns == 2
     assert store.daily_usage(NOW.date()).tokens == 150
+
+
+# --- Task 8: per-target pause/flags, stoppable loop -----------------------------------------
+
+
+async def test_per_target_pause_and_flags(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
+    store.set_flag("paused:fixture", "1")
+    await sched(env, ex).tick()
+    assert ex.seen == [] and store.get_flag("last_tick:fixture") == NOW.isoformat()
+    store.set_flag("paused:fixture", None)
+    store.set_flag("paused:other", "1")          # another target's pause does not apply
+    await sched(env, ex).tick()
+    assert [i.external_id for i in ex.seen] == [5]
+    assert store.get_flag("busy:fixture") is None
+
+
+def test_stop_requested(env) -> None:  # type: ignore[no-untyped-def]
+    from agent_sdlc.orchestrator.scheduler import stop_requested
+    store = env[0]
+    assert not stop_requested(store, "fixture")
+    store.set_flag("paused:fixture", "1")
+    assert stop_requested(store, "fixture") and not stop_requested(store, "other")
+    store.set_flag("paused:fixture", None)
+    store.set_flag("paused", "1")
+    assert stop_requested(store, "other")
+
+
+async def test_run_forever_stops_on_event(env) -> None:  # type: ignore[no-untyped-def]
+    import threading
+    stop = threading.Event()
+
+    class Once(ScriptedExecutor):
+        async def run(self, item: Item) -> StepResult:
+            stop.set()
+            return StepResult(Transition(Stage.PLAN))
+
+    await sched(env, Once()).run_forever(poll_s=60, stop=stop)
+    assert env[0].get_by_ref("fixture", 5).stage is Stage.PLAN

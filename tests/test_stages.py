@@ -497,3 +497,22 @@ async def test_changes_requested_review_labels_with_its_own_source(  # type: ign
     assert res.transition.to is Stage.IMPLEMENT
     assert [(lab.gold, lab.source) for lab in res.labels] == [
         ("change_request", "changes_requested")]
+
+
+async def test_agent_waits_for_a_session_slot_and_honours_pause(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    from agent_sdlc.orchestrator.slots import SessionSlots
+    from agent_sdlc.types import AgentInterrupted
+    slots = SessionSlots(1, poll_s=0.01)
+    forge = FakeForge(origin=origin_repo)
+    forge.add(WI)
+    ex = StageExecutor(target=target, forge=forge, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=Workspaces(tmp_path / "ws", target),
+                       path_policy=PathPolicy(target.policy.protected_paths),
+                       decisions_for=lambda _id: [], slots=slots, should_stop=lambda: True)
+    with slots.hold(lambda: False):     # another target holds the only slot
+        with pytest.raises(AgentInterrupted):
+            await ex.run(item(Stage.PLAN))
+    res = await ex.run(item(Stage.PLAN))  # slot free again: runs even though should_stop is set
+    assert res.transition.to is Stage.IMPLEMENT

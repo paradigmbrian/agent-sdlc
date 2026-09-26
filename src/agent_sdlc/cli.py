@@ -12,7 +12,7 @@ from agent_sdlc.decisions.gates import GATES
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
 from agent_sdlc.logctx import configure_logging
 from agent_sdlc.metrics import render_metrics
-from agent_sdlc.orchestrator.scheduler import in_flight
+from agent_sdlc.orchestrator.scheduler import in_flight, stop_requested
 from agent_sdlc.orchestrator.transitions import requeue
 from agent_sdlc.store import Store
 from agent_sdlc.targets import TargetConfig, load_target
@@ -41,8 +41,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--once", action="store_true")
     run.add_argument("--dry-run-push", action="store_true")
     run.add_argument("--poll", type=int, default=60)
-    sub.add_parser("pause")
-    sub.add_parser("resume")
+    pa = sub.add_parser("pause")
+    pa.add_argument("--target-name")
+    rs = sub.add_parser("resume")
+    rs.add_argument("--target-name")
     sub.add_parser("status")
     rq = sub.add_parser("requeue")
     rq.add_argument("item_id", type=int)
@@ -99,8 +101,8 @@ def _runtime(cfg: GlobalConfig, target: TargetConfig, store: Store, workspaces: 
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([*target.repo.install, *target.repo.commands.values()])
     runner = ClaudeAgentRunner(pp, cp, Path("~/.agent-sdlc/claude-config").expanduser(), auth_env,
-                               should_stop=lambda: store.get_flag("paused") == "1", home=ws.home,
-                               max_denials=target.limits.max_denials_per_session)
+                               should_stop=lambda: stop_requested(store, target.name),
+                               home=ws.home, max_denials=target.limits.max_denials_per_session)
     decider = Decider(LayaPredictor(cfg.laya.model), store.calibration,
                       cfg.laya.default_threshold)
     executor = StageExecutor(target=target, forge=forge, decider=decider, runner=runner,
@@ -124,18 +126,18 @@ def _ago(delta: timedelta) -> str:
 
 def _status(target: TargetConfig, store: Store) -> None:
     now = datetime.now(UTC)
-    paused = "yes" if store.get_flag("paused") == "1" else "no"
+    paused = "yes" if stop_requested(store, target.name) else "no"
     until = store.get_flag("paused_until") or "-"
     today = store.daily_usage(datetime.now().astimezone().date())
     print(f"target: {target.name}  paused: {paused}  paused_until: {until}")
-    tick = store.get_flag("last_tick")
+    tick = store.get_flag(f"last_tick:{target.name}")
     if tick is None:
         print("last tick: never  LOOP NOT RUNNING?")
     else:
         age = now - datetime.fromisoformat(tick)
         poll = int(store.get_flag("poll_s") or 60)
         warn = "  LOOP NOT RUNNING?" if age > timedelta(seconds=3 * poll) else ""
-        busy = store.get_flag("busy")
+        busy = store.get_flag(f"busy:{target.name}")
         busy_line = ""
         if busy:
             # A long step blocks the loop, so an old tick is expected while it runs (I5).
@@ -180,12 +182,16 @@ def main(argv: list[str] | None = None) -> int:
     traces = Path(args.traces)
 
     if args.cmd == "pause":
-        store.set_flag("paused", "1")
-        store.add_event("pause")
+        key = f"paused:{args.target_name}" if args.target_name else "paused"
+        store.set_flag(key, "1")
+        store.add_event("pause", {"target": args.target_name} if args.target_name else None)
     elif args.cmd == "resume":
-        store.set_flag("paused", None)
-        store.set_flag("paused_until", None)
-        store.add_event("resume")
+        if args.target_name:
+            store.set_flag(f"paused:{args.target_name}", None)
+        else:
+            store.set_flag("paused", None)
+            store.set_flag("paused_until", None)
+        store.add_event("resume", {"target": args.target_name} if args.target_name else None)
     elif args.cmd == "status":
         _status(target, store)
     elif args.cmd == "trace":

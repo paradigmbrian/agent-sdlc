@@ -111,3 +111,12 @@ def test_t4_digit_keyed_distribution_maps_by_int_order() -> None:
     raw10 = {"score": 0, "distribution": {"10": 0.0, "2": 0.1, "1": 0.1, "0": 0.8}}
     four = {"type": "score", "criteria": ["a", "b", "c", "d"]}
     assert normalize_answer(four, raw10) == pytest.approx({"a": 0.8, "b": 0.1, "c": 0.1, "d": 0.0})
+
+
+def test_locked_decider_delegates() -> None:
+    from agent_sdlc.decisions.decider import LockedDecider
+    from tests.fakes import FakeDecider
+    inner = FakeDecider()
+    out = LockedDecider(inner).decide("plan", {"plan": "p"})
+    assert set(out) == {"plan_addresses_item", "plan_scope_ok"}
+    assert inner.calls == [("plan", {"plan": "p"})]
