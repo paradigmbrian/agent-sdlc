@@ -53,10 +53,11 @@ def test_m12_defaults_resolve_from_project_root(
     capsys: pytest.CaptureFixture[str]
 ) -> None:
     from agent_sdlc.cli import _parser
+    monkeypatch.delenv("AGENT_SDLC_CONFIG", raising=False)
     monkeypatch.delenv("AGENT_SDLC_TARGET", raising=False)
     monkeypatch.chdir(tmp_path)
     args = _parser().parse_args(["status"])
-    assert Path(args.target) == ROOT / "targets" / "rallysource.yaml"
+    assert Path(args.config) == ROOT / "agent-sdlc.yaml" and args.target is None
     assert Path(args.workspaces) == ROOT / "workspaces"
     assert main(["--db", db, "status"]) == 0
     assert "target: rallysource" in capsys.readouterr().out
@@ -69,7 +70,7 @@ def test_trace_command(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(db, "trace", "9") == 0
     assert "branch agent/9-a" in capsys.readouterr().out
     assert run(db, "trace", "404") == 1
-    assert "no item #404" in capsys.readouterr().out
+    assert "no item 404" in capsys.readouterr().out
 
 
 def test_status_shows_last_tick_and_stale(db: str, capsys: pytest.CaptureFixture[str]) -> None:
@@ -137,7 +138,7 @@ def test_status_busy_suppresses_loop_warning(db: str, capsys: pytest.CaptureFixt
     store.set_flag("busy:rallysource", f"9|implement|{since.isoformat()}")
     assert run(db, "status") == 0
     out = capsys.readouterr().out
-    assert "busy: #9 implement for 10m" in out
+    assert "busy: rallysource#9 implement for 10m" in out
     assert "LOOP NOT RUNNING?" not in out and "STUCK?" not in out
 
 
@@ -150,7 +151,7 @@ def test_status_busy_past_stale_limit_is_stuck(
     store.set_flag("busy:rallysource", f"9|implement|{since.isoformat()}")
     assert run(db, "status") == 0
     out = capsys.readouterr().out
-    assert "busy: #9 implement for 3h  STUCK?" in out and "LOOP NOT RUNNING?" in out
+    assert "busy: rallysource#9 implement for 3h  STUCK?" in out and "LOOP NOT RUNNING?" in out
 
 
 def test_pause_one_target(db: str, capsys: pytest.CaptureFixture[str]) -> None:
@@ -161,3 +162,81 @@ def test_pause_one_target(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert Store(db).get_flag("paused:rallysource") == "1"
     assert run(db, "resume", "--target-name", "rallysource") == 0
     assert Store(db).get_flag("paused:rallysource") is None
+
+
+TARGET_YAML = """\
+name: {name}
+forge: {forge}
+repo: {{install: "true", commands: {{test: "true"}}}}
+policy: {{protected_paths: ["infra/**"]}}
+"""
+
+
+@pytest.fixture
+def two(tmp_path: Path) -> Path:
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "a.yaml").write_text(TARGET_YAML.format(
+        name="rally", forge="{kind: ado, org: o, project: p, repo: r}"))
+    (tmp_path / "t" / "b.yaml").write_text(TARGET_YAML.format(
+        name="tri", forge="{kind: github, owner: o, repo: r, app_id: 1}"))
+    cfg = tmp_path / "agent-sdlc.yaml"
+    cfg.write_text("targets: [t/a.yaml, t/b.yaml]\n")
+    return cfg
+
+
+def run_cfg(cfg: Path, db: str, *args: str) -> int:
+    return main(["--config", str(cfg), "--db", db, *args])
+
+
+def test_resolve_ref(db: str) -> None:
+    from agent_sdlc.cli import resolve_ref
+    store = Store(db)
+    store.add_item("rally", WorkItem(5, "A", "", "", "Bug", (), "u"), "b1")
+    store.add_item("tri", WorkItem(5, "B", "", "", "Bug", (), "u"), "b2")
+    store.add_item("tri", WorkItem(6, "C", "", "", "Bug", (), "u"), "b3")
+    names = ["rally", "tri"]
+    assert resolve_ref(store, names, "tri#5").title == "B"
+    assert resolve_ref(store, names, "6").title == "C"
+    with pytest.raises(LookupError, match="rally#5, tri#5"):
+        resolve_ref(store, names, "5")
+    with pytest.raises(LookupError, match="no item nope#5"):
+        resolve_ref(store, names, "nope#5")
+    with pytest.raises(LookupError, match="no item 404"):
+        resolve_ref(store, names, "404")
+    with pytest.raises(LookupError, match="use <target>#<id>"):
+        resolve_ref(store, names, "abc")
+
+
+def test_status_groups_targets(two: Path, db: str, capsys: pytest.CaptureFixture[str]) -> None:
+    store = Store(db)
+    store.add_item("rally", WorkItem(5, "Ado thing", "", "", "Bug", (), "u"), "b1")
+    store.add_item("tri", WorkItem(5, "Gh thing", "", "", "Bug", (), "u"), "b2")
+    store.set_flag("paused:tri", "1")
+    assert run_cfg(two, db, "status") == 0
+    out = capsys.readouterr().out
+    assert "target: rally  forge: ado  paused: no" in out
+    assert "target: tri  forge: github  paused: yes" in out
+    assert out.index("Ado thing") < out.index("target: tri") < out.index("Gh thing")
+    assert run_cfg(two, db, "status", "--target-name", "tri") == 0
+    assert "target: rally" not in capsys.readouterr().out
+
+
+def test_trace_by_ref_and_ambiguous(two: Path, db: str,
+                                    capsys: pytest.CaptureFixture[str]) -> None:
+    store = Store(db)
+    store.add_item("rally", WorkItem(5, "A", "", "", "Bug", (), "u"), "agent/5-a")
+    store.add_item("tri", WorkItem(5, "B", "", "", "Bug", (), "u"), "agent/5-b")
+    assert run_cfg(two, db, "trace", "tri#5") == 0
+    assert 'tri#5 "B"' in capsys.readouterr().out
+    assert run_cfg(two, db, "trace", "5") == 1
+    assert "rally#5, tri#5" in capsys.readouterr().out
+
+
+def test_requeue_local_by_ref(two: Path, db: str) -> None:
+    store = Store(db)
+    it = store.add_item("tri", WorkItem(7, "B", "", "", "Bug", (), "u"), "b")
+    assert it is not None
+    store.save(replace(it, stage=Stage.PARKED, park_reason=ParkReason.RED,
+                       parked_from=Stage.VERIFY))
+    assert run_cfg(two, db, "requeue", "tri#7", "--local") == 0
+    assert Store(db).get_by_ref("tri", 7).stage is Stage.VERIFY
