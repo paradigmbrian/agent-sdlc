@@ -91,7 +91,7 @@ forge:
   kind: github
   owner: paradigmbrian
   repo: triathlon-agent
-  app_id: 123456
+  app_id: null                  # the App id; null until the App exists (§7)
   installation_id: null         # null: looked up via GET /repos/{owner}/{repo}/installation
 intake:
   label: agent
@@ -147,8 +147,9 @@ Rules:
 - `forge` is a Pydantic discriminated union on `kind`:
   - `ado`: `org`, `project`, `repo`, optional `pat_secret` (keychain service name, default
     `agent-sdlc-ado-pat`).
-  - `github`: `owner`, `repo`, `app_id`, optional `installation_id`, optional `api_url` (default
-    `https://api.github.com`, for testing only).
+  - `github`: `owner`, `repo`, `app_id` (positive int, or null until the App exists; a GitHub
+    target with a null `app_id` fails at startup with "set forge.app_id in <file>"), optional
+    `installation_id`, optional `api_url` (default `https://api.github.com`, for testing only).
 - The clone URL is `repo.clone_url` if set, else derived: ADO
   `https://dev.azure.com/<org>/<project>/_git/<repo>`, GitHub
   `https://github.com/<owner>/<repo>.git`.
@@ -192,13 +193,14 @@ class ForgePort(Protocol):
     def git_auth_header(self) -> str: ...
     def push_branch(self, worktree: Path, branch: str) -> None: ...
     def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int: ...
-    def update_pr(self, pr_id: int, body: str) -> None: ...
+    def update_pr(self, pr_id: int, body: str, item_id: int) -> None: ...
     def pr_status(self, pr_id: int) -> str: ...          # active | completed | abandoned
     def pr_comments(self, pr_id: int) -> list[PrComment]: ...
     def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None: ...
     def comment_pr(self, pr_id: int, text: str) -> None: ...
     def delete_branch(self, branch: str) -> None: ...
     def pr_ref(self, pr_id: int) -> str: ...             # "!12" | "#12"
+    def item_ref(self, item_id: int) -> str: ...         # "AB#5" | "#5" (titles, commits, PR body)
 ```
 
 `PrComment` gains two fields:
@@ -220,8 +222,9 @@ token or key.
 
 Today's `AdoClient`, renamed and adapted to the port with no behaviour change: `get_work_item` →
 `get_item`, `comment_work_item` → `comment_item`, `set_tag`/`has_tag` → `set_label`/`has_label`,
-`reply_pr` reads `thread_id` and `comment_id` from the comment. `git_auth_header()` returns the
-existing Basic PAT header. `label_word = "tag"`, `pr_ref(n) = f"!{n}"`.
+`reply_pr` reads `thread_id` and `comment_id` from the comment; `update_pr` ignores `item_id`
+(ADO links work items through `workItemRefs`). `git_auth_header()` returns the existing Basic PAT
+header. `label_word = "tag"`, `pr_ref(n) = f"!{n}"`, `item_ref(n) = f"AB#{n}"`.
 
 ### 3.3 `GitHubForge`
 
@@ -280,7 +283,7 @@ pinned to the version current at implementation time).
 - `comment_pr`: `POST /issues/{n}/comments`.
 - `delete_branch`: `DELETE /git/refs/heads/<branch>` after the prefix check; 404 and 422 (already
   gone) are success.
-- `label_word = "label"`, `pr_ref(n) = f"#{n}"`.
+- `label_word = "label"`, `pr_ref(n) = f"#{n}"`, `item_ref(n) = f"#{n}"`.
 
 **Dry run.** Same rule as ADO (base spec §7.3): `push_branch`, `create_pr`, `update_pr`,
 `comment_pr`, `reply_pr` and `delete_branch` are no-ops; a dry-run PR has id `0`, status `active` and
@@ -295,8 +298,8 @@ reset time in the message. The scheduler's per-item backoff applies. It never se
 - `transitions.classify_comment` treats `c.changes_requested` like a `/agent` prefix: always
   `change_request`. The `/agent` slash-command label is recorded for both; the label `source` is
   `slash_command` or `changes_requested`.
-- `reporting.py` functions take the forge's `label_word`, `pr_ref` and the configured
-  `intake.parked_label` instead of hard-coding "tag", `agent:parked` and `!N`.
+- `reporting.py` functions take the forge's `label_word`, `pr_ref`, `item_ref` and the configured
+  `intake.parked_label` instead of hard-coding "tag", `agent:parked`, `!N` and `AB#N`.
 - `StageExecutor` and `Scheduler` take `forge: ForgePort` instead of `ado: AdoPort` and read
   `intake.*` and `repo.*` instead of `ado.*`.
 - `Workspaces` takes a callable `git_auth: Callable[[], str]` (bound to `forge.git_auth_header`)
@@ -397,7 +400,8 @@ joins them.
 5. Pilot check: in a clean clone of `main` with no `.env` and no running Postgres, confirm the
    install list and every command in `targets/triathlon.yaml` pass (db-marked tests skip). Narrow
    any command that fails for environmental reasons.
-6. Fill `app_id` in `targets/triathlon.yaml`.
+6. Fill `app_id` in `targets/triathlon.yaml`, then add `targets/triathlon.yaml` to `targets` in
+   `agent-sdlc.yaml` (it ships commented out so the loop does not retry an unconfigured target).
 
 ## 8. Testing
 
