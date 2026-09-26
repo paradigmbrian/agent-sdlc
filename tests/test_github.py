@@ -22,8 +22,10 @@ class FakeAuth:
     def __init__(self) -> None:
         self.tokens = ["ghs_one", "ghs_two"]
         self.invalidated = 0
+        self.calls = 0
 
     def token(self) -> str:
+        self.calls += 1
         return self.tokens[0]
 
     def invalidate(self) -> None:
@@ -312,6 +314,21 @@ def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
     assert "agent/5-x" in git("branch", "--list", "agent/*", cwd=origin_repo)
     with pytest.raises(ForgeError):
         f.push_branch(wt, "main")
+
+
+def test_m8_push_branch_fetches_the_token_only_once(
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    """push_branch must build its auth header from the same token it redacts with, not fetch
+    the token a second time (which could differ) via git_auth_header() (M-8)."""
+    ws = Workspaces(tmp_path / "w", target)
+    wt = ws.create(5, "agent/5-x")
+    (wt / "f.txt").write_text("x")
+    ws.commit(wt, "feat: f")
+    auth = FakeAuth()
+    f = forge(auth=auth, push_url=str(origin_repo))
+    f.push_branch(wt, "agent/5-x")
+    assert auth.calls == 1
 
 
 def test_push_failure_is_redacted(tmp_path: Path, target: TargetConfig) -> None:

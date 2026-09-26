@@ -104,7 +104,11 @@ class GitHubForge:
             raise ForgeError(f"refusing ref outside {self._branch_prefix}*: {branch}")
 
     def git_auth_header(self) -> str:
-        cred = base64.b64encode(f"x-access-token:{self._auth.token()}".encode()).decode()
+        return self._header_for(self._auth.token())
+
+    @staticmethod
+    def _header_for(token: str) -> str:
+        cred = base64.b64encode(f"x-access-token:{token}".encode()).decode()
         return f"Authorization: Basic {cred}"
 
     def pr_ref(self, pr_id: int) -> str:
@@ -170,9 +174,11 @@ class GitHubForge:
         if self._dry_run:
             log.info("dry-run: would push %s", branch)
             return
+        # M-8: fetch the token exactly once so the header we push with and the string we
+        # redact on failure can never diverge (a second token() call could return a new one).
         token = self._auth.token()
         r = subprocess.run(
-            ["git", "-c", f"http.extraheader={self.git_auth_header()}", "push", self._push_url,
+            ["git", "-c", f"http.extraheader={self._header_for(token)}", "push", self._push_url,
              f"HEAD:refs/heads/{branch}"],
             cwd=worktree, capture_output=True, text=True, env=git_env())
         if r.returncode != 0:
