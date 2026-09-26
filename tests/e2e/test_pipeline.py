@@ -22,7 +22,7 @@ from agent_sdlc.types import (
 )
 from agent_sdlc.workspaces import Workspaces
 from tests.conftest import git
-from tests.fakes import FakeAdo, FakeDecider, FakeRunner
+from tests.fakes import FakeDecider, FakeForge, FakeRunner
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 WI = WorkItem(5, "Add feature", "Please add feature.txt", "feature.txt exists", "Bug",
@@ -33,18 +33,18 @@ class Env:
     def __init__(self, tmp_path: Path, target: TargetConfig, origin: Path,
                  traces: Path | None = None) -> None:
         self.store = Store("sqlite://")
-        self.ado = FakeAdo(origin=origin)
-        self.ado.add(WI)
+        self.forge = FakeForge(origin=origin)
+        self.forge.add(WI)
         self.ws = Workspaces(tmp_path / "ws", target)
         self.decider = FakeDecider()
         self.runner = FakeRunner()
         self.origin = origin
-        executor = StageExecutor(target=target, ado=self.ado, decider=self.decider,
+        executor = StageExecutor(target=target, forge=self.forge, decider=self.decider,
                                  runner=self.runner, workspaces=self.ws,
                                  path_policy=PathPolicy(target.policy.protected_paths),
                                  decisions_for=self.store.decisions_for, traces=traces)
-        self.sched = Scheduler(target=target, store=self.store, executor=executor, ado=self.ado,
-                               workspaces=self.ws, clock=lambda: NOW)
+        self.sched = Scheduler(target=target, store=self.store, executor=executor,
+                               forge=self.forge, workspaces=self.ws, clock=lambda: NOW)
 
     async def ticks(self, n: int) -> None:
         for _ in range(n):
@@ -64,11 +64,11 @@ async def test_happy_path_to_pr_then_merge(env: Env) -> None:
     await env.ticks(6)  # triage, plan, implement, verify, review, pr_open
     item = env.item
     assert item.stage is Stage.AWAITING_HUMAN and item.pr_id == 100
-    pr = env.ado.prs[100]
+    pr = env.forge.prs[100]
     assert pr["branch"] == "agent/5-add-feature" and "AB#5" in pr["body"]
     assert "agent/5-add-feature" in git("branch", "--list", "agent/*", cwd=env.origin)
     assert [r for r, _ in env.runner.calls] == ["planner", "implementer", "reviewer"]
-    env.ado.prs[100]["status"] = "completed"
+    env.forge.prs[100]["status"] = "completed"
     await env.ticks(1)
     assert env.item.stage is Stage.DONE
     assert not env.ws.worktree_path(5).exists()
@@ -85,8 +85,8 @@ async def test_red_tests_park_after_retries(env: Env) -> None:
     await env.ticks(2 + 2 * 4)  # triage, plan, then (implement, verify) x 4
     item = env.item
     assert item.stage is Stage.PARKED and item.park_reason is ParkReason.RED
-    assert "agent:parked" in env.ado.tags[5]
-    assert any("broken.txt present" in c for _, c in env.ado.wi_comments)
+    assert "agent:parked" in env.forge.tags[5]
+    assert any("broken.txt present" in c for _, c in env.forge.wi_comments)
 
 
 async def test_protected_path_is_caught_before_push(env: Env) -> None:
@@ -98,7 +98,7 @@ async def test_protected_path_is_caught_before_push(env: Env) -> None:
     env.runner.behaviors["implementer"] = write_infra
     await env.ticks(3)
     assert env.item.park_reason is ParkReason.POLICY
-    assert env.ado.prs == {}
+    assert env.forge.prs == {}
     assert git("branch", "--list", "agent/*", cwd=env.origin) == ""
 
 
@@ -117,7 +117,7 @@ async def test_shadow_triage_then_human_approval(env: Env) -> None:
     env.decider.shadow = {"triage"}
     await env.ticks(1)
     assert env.item.park_reason is ParkReason.NEEDS_HUMAN
-    env.ado.set_tag(5, "agent:parked", False)
+    env.forge.set_label(5, "agent:parked", False)
     await env.ticks(1)
     assert env.item.stage is Stage.IMPLEMENT  # requeued to plan, plan ran in the same tick
     assert env.store.labels("triage", "clarity")[0][1] == "clear"
@@ -125,21 +125,21 @@ async def test_shadow_triage_then_human_approval(env: Env) -> None:
 
 async def test_pr_change_request_round(env: Env) -> None:
     await env.ticks(6)
-    env.ado.pr_threads[100].append(PrComment(1, 1, "Brian", "/agent also add docs.txt"))
+    env.forge.pr_threads[100].append(PrComment(1, 1, "Brian", "/agent also add docs.txt"))
     await env.ticks(1)  # awaiting poll -> implement, then implement runs in the same tick
     assert env.item.stage is Stage.VERIFY and env.item.pr_rounds == 1
     await env.ticks(3)  # verify, review, pr_open
     assert env.item.stage is Stage.AWAITING_HUMAN
-    assert env.ado.prs[100]["updates"] == 1
+    assert env.forge.prs[100]["updates"] == 1
     assert "/agent also add docs.txt" in env.runner.calls[3][1]
 
 
 async def test_bot_reply_not_reprocessed(env: Env) -> None:
     await env.ticks(6)
     env.decider.answers["comment"] = {"comment_intent": "question"}
-    env.ado.pr_threads[100].append(PrComment(1, 1, "Brian", "why?"))
+    env.forge.pr_threads[100].append(PrComment(1, 1, "Brian", "why?"))
     await env.ticks(3)
-    assert len(env.ado.replies) == 1
+    assert len(env.forge.replies) == 1
     assert env.item.stage is Stage.AWAITING_HUMAN
 
 
@@ -156,7 +156,7 @@ async def test_escalated_agent_parks_with_trace(
     env.runner.behaviors["implementer"] = escape
     await env.ticks(3)  # triage, plan, implement
     assert env.item.stage is Stage.PARKED and env.item.park_reason is ParkReason.POLICY
-    assert any("Blocked tool calls" in c and ".ssh/config" in c for _, c in env.ado.wi_comments)
+    assert any("Blocked tool calls" in c and ".ssh/config" in c for _, c in env.forge.wi_comments)
     kinds = [e.kind for e in env.store.events_for(5)]
     assert "tool_denied" in kinds and kinds[-1] == "park_tagged"
     out = render_trace(env.store, 5)
@@ -184,8 +184,8 @@ async def test_manifest_change_needs_approval_then_reinstalls(
     env.runner.behaviors["implementer"] = work
     await env.ticks(3)  # triage, plan, implement
     assert env.item.park_reason is ParkReason.MANIFEST
-    assert any("left-pad" in c for _, c in env.ado.wi_comments)
-    env.ado.set_tag(5, "agent:parked", False)
+    assert any("left-pad" in c for _, c in env.forge.wi_comments)
+    env.forge.set_label(5, "agent:parked", False)
     await env.ticks(1)  # requeue -> verify runs in the same tick
     assert env.item.stage is Stage.REVIEW
     installs = [e for e in env.store.events_for(5)
@@ -193,14 +193,14 @@ async def test_manifest_change_needs_approval_then_reinstalls(
     assert len(installs) == 2  # before implement, and after the approved manifest change
     await env.ticks(2)  # review, pr_open
     assert env.item.stage is Stage.AWAITING_HUMAN
-    env.ado.pr_threads[100].append(PrComment(1, 1, "Brian", "/agent add docs"))
+    env.forge.pr_threads[100].append(PrComment(1, 1, "Brian", "/agent add docs"))
     await env.ticks(2)  # awaiting -> implement (same tick), verify
     assert env.item.stage is Stage.REVIEW  # unchanged manifest digest: no second park
 
 
 async def test_abandoned_pr_records_outcome_for_labeling(env: Env) -> None:
     await env.ticks(6)
-    env.ado.prs[100]["status"] = "abandoned"
+    env.forge.prs[100]["status"] = "abandoned"
     await env.ticks(1)
     assert env.item.stage is Stage.CLOSED
     assert [e.payload["result"] for e in env.store.events_for(5) if e.kind == "outcome"] == [

@@ -67,8 +67,9 @@ class FakeRunner:
 
 
 @dataclass
-class FakeAdo:
+class FakeForge:
     origin: Path | None = None                         # local bare repo to push into
+    kind: str = "ado"                                  # "ado" | "github" wording
     items: dict[int, WorkItem] = field(default_factory=dict)
     tags: dict[int, set[str]] = field(default_factory=dict)
     wi_comments: list[tuple[int, str]] = field(default_factory=list)
@@ -76,6 +77,19 @@ class FakeAdo:
     pr_threads: dict[int, list[PrComment]] = field(default_factory=dict)
     replies: list[tuple[int, int, str]] = field(default_factory=list)
     deleted_branches: list[str] = field(default_factory=list)
+
+    @property
+    def label_word(self) -> str:
+        return "tag" if self.kind == "ado" else "label"
+
+    def pr_ref(self, pr_id: int) -> str:
+        return f"!{pr_id}" if self.kind == "ado" else f"#{pr_id}"
+
+    def item_ref(self, item_id: int) -> str:
+        return f"AB#{item_id}" if self.kind == "ado" else f"#{item_id}"
+
+    def git_auth_header(self) -> str:
+        return ""
 
     def add(self, wi: WorkItem) -> None:
         self.items[wi.id] = wi
@@ -87,17 +101,17 @@ class FakeAdo:
     def list_closed(self, limit: int) -> list[WorkItem]:
         return list(self.items.values())[:limit]
 
-    def get_work_item(self, id: int) -> WorkItem:
+    def get_item(self, id: int) -> WorkItem:
         return self.items[id]
 
-    def comment_work_item(self, id: int, html_text: str) -> None:
-        self.wi_comments.append((id, html_text))
+    def comment_item(self, id: int, html: str) -> None:
+        self.wi_comments.append((id, html))
 
-    def set_tag(self, id: int, tag: str, present: bool) -> None:
-        (self.tags[id].add if present else self.tags[id].discard)(tag)
+    def set_label(self, id: int, label: str, present: bool) -> None:
+        (self.tags[id].add if present else self.tags[id].discard)(label)
 
-    def has_tag(self, id: int, tag: str) -> bool:
-        return tag in self.tags[id]
+    def has_label(self, id: int, label: str) -> bool:
+        return label in self.tags[id]
 
     def push_branch(self, worktree: Path, branch: str) -> None:
         assert branch.startswith("agent/")
@@ -105,15 +119,18 @@ class FakeAdo:
             subprocess.run(["git", "push", str(self.origin), f"HEAD:refs/heads/{branch}"],
                            cwd=worktree, check=True, capture_output=True)
 
-    def create_pr(self, branch: str, title: str, body: str, work_item_id: int) -> int:
+    def _body(self, body: str, item_id: int) -> str:
+        return body if self.kind == "ado" else f"{body}\n\nCloses #{item_id}"
+
+    def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
         pr_id = 100 + len(self.prs)
-        self.prs[pr_id] = {"branch": branch, "title": title, "body": body, "status": "active",
-                           "work_item": work_item_id, "updates": 0}
+        self.prs[pr_id] = {"branch": branch, "title": title, "body": self._body(body, item_id),
+                           "status": "active", "work_item": item_id, "updates": 0}
         self.pr_threads[pr_id] = []
         return pr_id
 
-    def update_pr(self, pr_id: int, body: str) -> None:
-        self.prs[pr_id]["body"] = body
+    def update_pr(self, pr_id: int, body: str, item_id: int) -> None:
+        self.prs[pr_id]["body"] = self._body(body, item_id)
         self.prs[pr_id]["updates"] += 1
 
     def pr_status(self, pr_id: int) -> str:
@@ -122,8 +139,8 @@ class FakeAdo:
     def pr_comments(self, pr_id: int) -> list[PrComment]:
         return list(self.pr_threads[pr_id])
 
-    def reply_pr(self, pr_id: int, thread_id: int, parent_comment_id: int, text: str) -> None:
-        self.replies.append((pr_id, thread_id, text))
+    def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
+        self.replies.append((pr_id, comment.thread_id, text))
 
     def comment_pr(self, pr_id: int, text: str) -> None:
         self.replies.append((pr_id, 0, text))

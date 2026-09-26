@@ -9,14 +9,14 @@ from typing import Protocol
 
 import httpx
 
-from agent_sdlc.adapters.ado import AdoError
+from agent_sdlc.adapters.errors import ForgeError
 from agent_sdlc.config import GlobalLimits
 from agent_sdlc.logctx import log_context
 from agent_sdlc.orchestrator.events import agent_events, transition_event
 from agent_sdlc.orchestrator.reporting import park_comment_html
 from agent_sdlc.orchestrator.stages import StepResult
 from agent_sdlc.orchestrator.transitions import APPROVAL_LABELS, apply_transition, park, requeue
-from agent_sdlc.ports import AdoPort, WorkspacePort
+from agent_sdlc.ports import ForgePort, WorkspacePort
 from agent_sdlc.store import LabelInput, Store
 from agent_sdlc.targets import TargetConfig
 from agent_sdlc.types import (
@@ -35,7 +35,7 @@ from agent_sdlc.types import (
 from agent_sdlc.workspaces import GitError, slugify
 
 log = logging.getLogger(__name__)
-_INFRA_ERRORS = (httpx.HTTPError, GitError, AdoError, OSError)
+_INFRA_ERRORS = (httpx.HTTPError, GitError, ForgeError, OSError)
 _MAX_INFRA_FAILURES = 3
 _DEFAULT_PAUSE = timedelta(minutes=30)
 
@@ -66,13 +66,14 @@ def in_flight(items: list[Item], limit: int) -> list[Item]:
 
 
 class Scheduler:
-    def __init__(self, *, target: TargetConfig, store: Store, executor: Executor, ado: AdoPort,
-                 workspaces: WorkspacePort, clock: Callable[[], datetime] | None = None,
+    def __init__(self, *, target: TargetConfig, store: Store, executor: Executor,
+                 forge: ForgePort, workspaces: WorkspacePort,
+                 clock: Callable[[], datetime] | None = None,
                  limits: GlobalLimits | None = None) -> None:
         self._t = target
         self._store = store
         self._executor = executor
-        self._ado = ado
+        self._forge = forge
         self._ws = workspaces
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._limits = limits or GlobalLimits()
@@ -131,7 +132,7 @@ class Scheduler:
     # intake & requeue ------------------------------------------------------
     def _intake(self) -> None:
         try:
-            intake = self._ado.list_intake()
+            intake = self._forge.list_intake()
         except _INFRA_ERRORS as e:
             log.warning("intake failed; skipping this tick: %s", e)
             return
@@ -152,9 +153,9 @@ class Scheduler:
                 self._park_side_effects(item)
                 continue
             try:
-                tagged = self._ado.has_tag(item.id, self._t.intake.parked_label)
+                tagged = self._forge.has_label(item.id, self._t.intake.parked_label)
             except _INFRA_ERRORS as e:
-                log.warning("has_tag failed for #%s; leaving parked this tick: %s", item.id, e)
+                log.warning("has_label failed for #%s; leaving parked this tick: %s", item.id, e)
                 continue
             if not tagged:
                 self.requeue_item(item.id)
@@ -182,7 +183,7 @@ class Scheduler:
         self._store.commit_step(new, [], Usage(), self._clock().date(), labels,
                                 events=[event], at=item)
         try:
-            self._ado.set_tag(item.id, self._t.intake.parked_label, False)
+            self._forge.set_label(item.id, self._t.intake.parked_label, False)
         except _INFRA_ERRORS as e:
             log.warning("clearing parked tag failed for #%s (idempotent cleanup): %s", item.id, e)
         log.info("requeued #%s -> %s", item.id, new.stage)
@@ -277,7 +278,7 @@ class Scheduler:
         """Tag first, and record that the tag is set, before commenting: only a confirmed tag
         makes its later removal mean "a human approved" (C1)."""
         try:
-            self._ado.set_tag(item.id, self._t.intake.parked_label, True)
+            self._forge.set_label(item.id, self._t.intake.parked_label, True)
         except _INFRA_ERRORS as e:
             log.exception("setting the parked tag failed for #%s; will retry", item.id)
             self._store.add_event("park_side_effect_failed",
@@ -286,9 +287,9 @@ class Scheduler:
         self._store.save(replace(item, data={**item.data, "parked_tag_set": True}),
                          events=[EventInput("park_tagged")], at=item)
         try:
-            self._ado.comment_work_item(item.id, park_comment_html(item))
+            self._forge.comment_item(item.id, park_comment_html(item))
             if item.pr_id:
-                self._ado.comment_pr(item.pr_id, f"agent-sdlc parked this item "
+                self._forge.comment_pr(item.pr_id, f"agent-sdlc parked this item "
                                      f"({item.park_reason}): {item.data.get('park_note', '')}")
         except _INFRA_ERRORS as e:
             log.exception("park comments failed for #%s", item.id)
@@ -303,6 +304,6 @@ class Scheduler:
             if item.stage in (Stage.DONE, Stage.CLOSED):
                 self._ws.remove(item.id, item.branch)
                 if item.pr_id:
-                    self._ado.delete_branch(item.branch)
+                    self._forge.delete_branch(item.branch)
         except _INFRA_ERRORS:
             log.exception("side effects failed for #%s", item.id)

@@ -124,10 +124,12 @@ class PrComment:
     comment_id: int
     author: str
     content: str
+    kind: str = "thread"             # ado: thread · github: conversation | review_comment | review
+    changes_requested: bool = False  # github: a review in state CHANGES_REQUESTED
 
     @property
     def key(self) -> str:
-        return f"{self.thread_id}:{self.comment_id}"
+        return f"{self.kind}:{self.thread_id}:{self.comment_id}"
 
 
 @dataclass(frozen=True)

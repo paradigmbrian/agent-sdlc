@@ -7,7 +7,7 @@ from typing import Any
 
 from agent_sdlc.decisions.calibration import accuracy, apply_temperature, ece, fit_temperature
 from agent_sdlc.decisions.gates import GATES, option_keys, triage_state, work_item_text
-from agent_sdlc.ports import AdoPort, DeciderPort
+from agent_sdlc.ports import DeciderPort, ForgePort
 from agent_sdlc.store import LabelInput, Store
 from agent_sdlc.types import Calibration, Decision
 
@@ -58,10 +58,10 @@ def _ask_gold(ask: Callable[[str], str], question: str, keys: list[str], hint: s
     return answer if answer in keys else None
 
 
-def label_triage(ado: AdoPort, decider: DeciderPort, store: Store, limit: int,
+def label_triage(forge: ForgePort, decider: DeciderPort, store: Store, limit: int,
                  ask: Callable[[str], str]) -> int:
     count = 0
-    for wi in ado.list_closed(limit):
+    for wi in forge.list_closed(limit):
         print(f"\n=== #{wi.id} ===\n{work_item_text(wi, 2000)}")
         ds = decider.decide("triage", triage_state(wi))
         for q, d in ds.items():

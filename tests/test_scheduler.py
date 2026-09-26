@@ -26,7 +26,7 @@ from agent_sdlc.types import (
     WorkItem,
 )
 from agent_sdlc.workspaces import Workspaces
-from tests.fakes import FakeAdo, FakeDecider, FakeRunner
+from tests.fakes import FakeDecider, FakeForge, FakeRunner
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=UTC)
 WI = WorkItem(5, "Add feature", "d", "ac", "Bug", ("agent",), "u")
@@ -46,8 +46,8 @@ class ScriptedExecutor:
 
 
 @dataclass
-class RaisingAdo(FakeAdo):
-    """FakeAdo that raises an infra error from named methods (fix round 1, R15)."""
+class RaisingAdo(FakeForge):
+    """FakeForge that raises an infra error from named methods (fix round 1, R15)."""
 
     fail: set[str] = field(default_factory=set)
 
@@ -56,21 +56,21 @@ class RaisingAdo(FakeAdo):
             raise httpx.ConnectError("down")
         return super().list_intake()
 
-    def has_tag(self, id: int, tag: str) -> bool:
-        if "has_tag" in self.fail:
+    def has_label(self, id: int, label: str) -> bool:
+        if "has_label" in self.fail:
             raise httpx.ConnectError("down")
-        return super().has_tag(id, tag)
+        return super().has_label(id, label)
 
-    def set_tag(self, id: int, tag: str, present: bool) -> None:
-        if "set_tag" in self.fail:
+    def set_label(self, id: int, label: str, present: bool) -> None:
+        if "set_label" in self.fail:
             raise httpx.ConnectError("down")
-        super().set_tag(id, tag, present)
+        super().set_label(id, label, present)
 
 
 @pytest.fixture
 def env(tmp_path: Path, target: TargetConfig):  # type: ignore[no-untyped-def]
     store = Store("sqlite://")
-    ado = FakeAdo()
+    ado = FakeForge()
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
     return store, ado, ws, target
@@ -78,7 +78,7 @@ def env(tmp_path: Path, target: TargetConfig):  # type: ignore[no-untyped-def]
 
 def sched(env, executor, now=NOW):  # type: ignore[no-untyped-def]
     store, ado, ws, target = env
-    return Scheduler(target=target, store=store, executor=executor, ado=ado, workspaces=ws,
+    return Scheduler(target=target, store=store, executor=executor, forge=ado, workspaces=ws,
                      clock=lambda: now)
 
 
@@ -113,14 +113,14 @@ async def test_parking_comments_and_tags(env) -> None:  # type: ignore[no-untype
 
 async def test_removing_tag_requeues_with_labels(env) -> None:  # type: ignore[no-untyped-def]
     store, ado, ws, target = env
-    real = StageExecutor(target=target, ado=ado, decider=FakeDecider(shadow={"triage"}),
+    real = StageExecutor(target=target, forge=ado, decider=FakeDecider(shadow={"triage"}),
                          runner=FakeRunner(), workspaces=ws,
                          path_policy=PathPolicy(target.policy.protected_paths),
                          decisions_for=store.decisions_for)
     s = sched(env, real)
     await s.tick()
     assert store.get(5).park_reason is ParkReason.NEEDS_HUMAN
-    ado.set_tag(5, "agent:parked", False)
+    ado.set_label(5, "agent:parked", False)
     s._executor = ScriptedExecutor(StepResult(Transition(Stage.IMPLEMENT)))  # stop after requeue
     await s.tick()
     assert store.get(5).stage is Stage.IMPLEMENT  # requeued to PLAN, then stepped once
@@ -162,7 +162,7 @@ async def test_item_budget_parks(env) -> None:  # type: ignore[no-untyped-def]
     tight = target.model_copy(update={"limits": target.limits.model_copy(
         update={"max_item_tokens": 100})})
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN), Usage(1, 90, 20)))
-    await Scheduler(target=tight, store=store, executor=ex, ado=ado, workspaces=ws,
+    await Scheduler(target=tight, store=store, executor=ex, forge=ado, workspaces=ws,
                     clock=lambda: NOW).tick()
     assert store.get(5).park_reason is ParkReason.BUDGET
 
@@ -173,7 +173,7 @@ async def test_run_window_blocks_agent_stages_not_polling(env) -> None:  # type:
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
     store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)))
-    await Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+    await Scheduler(target=target, store=store, executor=ex, forge=ado, workspaces=ws,
                     clock=lambda: NOW,
                     limits=GlobalLimits(run_window=RunWindow(start=time(19), end=time(7)))).tick()
     assert [i.id for i in ex.seen] == [5]
@@ -213,7 +213,7 @@ async def test_intake_error_still_polls_and_steps(  # type: ignore[no-untyped-de
     store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)),
                           StepResult(Transition(Stage.PLAN)))
-    s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+    s = Scheduler(target=target, store=store, executor=ex, forge=ado, workspaces=ws,
                  clock=lambda: NOW)
     await s.tick()  # list_intake() raises; intake skipped, rest of tick proceeds
     assert [i.id for i in ex.seen] == [5, 6]
@@ -223,7 +223,7 @@ async def test_has_tag_error_skips_item_others_continue(  # type: ignore[no-unty
     tmp_path: Path, target: TargetConfig
 ) -> None:
     store = Store("sqlite://")
-    ado = RaisingAdo(fail={"has_tag"})
+    ado = RaisingAdo(fail={"has_label"})
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
     store.add_item("fixture", WI, "agent/5-add-feature")
@@ -231,9 +231,9 @@ async def test_has_tag_error_skips_item_others_continue(  # type: ignore[no-unty
                        parked_from=Stage.TRIAGE, data={"parked_tag_set": True}))
     store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN)))
-    s = Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+    s = Scheduler(target=target, store=store, executor=ex, forge=ado, workspaces=ws,
                  clock=lambda: NOW)
-    await s.tick()  # has_tag() raises for item 5; requeue skipped, item 6 still steps
+    await s.tick()  # has_label() raises for item 5; requeue skipped, item 6 still steps
     assert [i.id for i in ex.seen] == [6]
     assert store.get(5).stage is Stage.PARKED
 
@@ -242,15 +242,15 @@ async def test_requeue_item_set_tag_error_still_requeues(  # type: ignore[no-unt
     tmp_path: Path, target: TargetConfig
 ) -> None:
     store = Store("sqlite://")
-    ado = RaisingAdo(fail={"set_tag"})
+    ado = RaisingAdo(fail={"set_label"})
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
     store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.PARKED, park_reason=ParkReason.NEEDS_HUMAN,
                        parked_from=Stage.TRIAGE))
-    s = Scheduler(target=target, store=store, executor=ScriptedExecutor(), ado=ado, workspaces=ws,
+    s = Scheduler(target=target, store=store, executor=ScriptedExecutor(), forge=ado, workspaces=ws,
                  clock=lambda: NOW)
-    new = s.requeue_item(5)  # set_tag() raises; requeue still commits and no exception escapes
+    new = s.requeue_item(5)  # set_label() raises; requeue still commits and no exception escapes
     assert new.stage is Stage.PLAN
     assert store.get(5).stage is Stage.PLAN
 
@@ -259,8 +259,8 @@ async def test_requeue_item_set_tag_error_still_requeues(  # type: ignore[no-unt
 
 
 @dataclass
-class FlakyAdo(FakeAdo):
-    """FakeAdo whose named methods raise an infra error for their next N calls."""
+class FlakyAdo(FakeForge):
+    """FakeForge whose named methods raise an infra error for their next N calls."""
 
     fail_counts: dict[str, int] = field(default_factory=dict)
 
@@ -269,13 +269,13 @@ class FlakyAdo(FakeAdo):
             self.fail_counts[name] -= 1
             raise httpx.ConnectError("blip")
 
-    def comment_work_item(self, id: int, html_text: str) -> None:
-        self._maybe_fail("comment_work_item")
-        super().comment_work_item(id, html_text)
+    def comment_item(self, id: int, html: str) -> None:
+        self._maybe_fail("comment_item")
+        super().comment_item(id, html)
 
-    def set_tag(self, id: int, tag: str, present: bool) -> None:
-        self._maybe_fail("set_tag")
-        super().set_tag(id, tag, present)
+    def set_label(self, id: int, label: str, present: bool) -> None:
+        self._maybe_fail("set_label")
+        super().set_label(id, label, present)
 
 
 def _flaky(tmp_path: Path, target: TargetConfig, ex: ScriptedExecutor,
@@ -283,7 +283,7 @@ def _flaky(tmp_path: Path, target: TargetConfig, ex: ScriptedExecutor,
     store = Store("sqlite://")
     ado = FlakyAdo(fail_counts=dict(fails))
     ado.add(WI)
-    s = Scheduler(target=target, store=store, executor=ex, ado=ado,
+    s = Scheduler(target=target, store=store, executor=ex, forge=ado,
                   workspaces=Workspaces(tmp_path / "ws", target), clock=lambda: NOW)
     return store, ado, s
 
@@ -292,7 +292,7 @@ async def test_c1_park_comment_failure_still_tags_and_is_not_requeued(
     tmp_path: Path, target: TargetConfig
 ) -> None:
     ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
-    store, ado, s = _flaky(tmp_path, target, ex, comment_work_item=1)
+    store, ado, s = _flaky(tmp_path, target, ex, comment_item=1)
     await s.tick()
     assert "agent:parked" in ado.tags[5]
     assert store.get(5).data.get("parked_tag_set") is True
@@ -305,7 +305,7 @@ async def test_c1_park_set_tag_failure_is_retried_and_never_requeued(
     tmp_path: Path, target: TargetConfig
 ) -> None:
     ex = ScriptedExecutor(StepResult(park(ParkReason.NEEDS_HUMAN, "unclear")))
-    store, ado, s = _flaky(tmp_path, target, ex, set_tag=2)
+    store, ado, s = _flaky(tmp_path, target, ex, set_label=2)
     await s.tick()  # park; set_tag fails
     assert "agent:parked" not in ado.tags[5] and "parked_tag_set" not in store.get(5).data
     assert ado.wi_comments == []  # tag first, then comment
@@ -325,7 +325,7 @@ async def test_c1_removing_tag_after_successful_park_requeues(
                           StepResult(Transition(Stage.IMPLEMENT)))
     store, ado, s = _flaky(tmp_path, target, ex)
     await s.tick()
-    ado.set_tag(5, "agent:parked", False)
+    ado.set_label(5, "agent:parked", False)
     await s.tick()
     item = store.get(5)
     assert item.stage is Stage.IMPLEMENT and "parked_tag_set" not in item.data
@@ -356,7 +356,7 @@ async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: 
         store.add_item("fixture", replace(WI, id=i), f"agent/{i}-x")
         store.save(replace(store.get(i), stage=Stage.IMPLEMENT))
     ex = ScriptedExecutor(RuntimeError("boom"), StepResult(Transition(Stage.VERIFY)))
-    await Scheduler(target=two, store=store, executor=ex, ado=ado, workspaces=ws,
+    await Scheduler(target=two, store=store, executor=ex, forge=ado, workspaces=ws,
                     clock=lambda: NOW).tick()
     assert [i.id for i in ex.seen] == [5, 6]
     assert store.get(5).infra_failures == 1 and store.get(6).stage is Stage.VERIFY
@@ -391,7 +391,7 @@ async def test_i4_cache_reads_do_not_trip_item_budget(env) -> None:  # type: ign
         update={"max_item_tokens": 100})})
     ex = ScriptedExecutor(StepResult(Transition(Stage.PLAN),
                                      Usage(1, 50, 20, cache_read_tokens=1_000_000)))
-    await Scheduler(target=tight, store=store, executor=ex, ado=ado, workspaces=ws,
+    await Scheduler(target=tight, store=store, executor=ex, forge=ado, workspaces=ws,
                     clock=lambda: NOW).tick()
     item = store.get(5)
     assert item.stage is Stage.PLAN and item.usage.cache_read_tokens == 1_000_000
@@ -413,7 +413,7 @@ async def test_agent_error_park_requeue_retries_stage_without_labels(  # type: i
     s = sched(env, ex)
     await s.tick()
     assert store.get(5).park_reason is ParkReason.AGENT_ERROR
-    ado.set_tag(5, "agent:parked", False)
+    ado.set_label(5, "agent:parked", False)
     await s.tick()
     assert ex.seen[1].stage is Stage.PLAN  # retried the plan stage, not approved past it
     assert store.labels("plan", "plan_scope_ok") == []

@@ -188,3 +188,18 @@ def test_install_runs_each_command_and_stops_at_first_failure(
     assert r.exit_code == 3 and "one" in r.output and "never" not in r.output
     assert r.command == "echo one ; sh -c 'exit 3' ; echo never"
     assert "$ echo one" in (tmp_path / "install.log").read_text()
+
+
+def test_git_auth_callable_is_called_for_every_authenticated_git_call(
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    calls: list[int] = []
+
+    def header() -> str:
+        calls.append(1)
+        return "X-Test: 1"
+
+    ws = Workspaces(tmp_path / "w", target, git_auth=header)
+    ws.create(1, "agent/1-a")   # clone (auth)
+    ws.create(2, "agent/2-b")   # fetch (auth)
+    assert len(calls) == 2

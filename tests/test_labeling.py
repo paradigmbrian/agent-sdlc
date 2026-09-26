@@ -5,7 +5,7 @@ import pytest
 from agent_sdlc.labeling import MIN_LABELS, calibrate_question, label_logged, label_triage
 from agent_sdlc.store import LabelInput, Store
 from agent_sdlc.types import WorkItem
-from tests.fakes import FakeAdo, FakeDecider
+from tests.fakes import FakeDecider, FakeForge
 
 
 def _seed(store: Store, n: int, acc: float) -> None:
@@ -39,10 +39,10 @@ def test_calibrate_refuses_promotion_on_bad_ece() -> None:
 
 
 def test_label_triage_records_answers() -> None:
-    store, ado, decider = Store("sqlite://"), FakeAdo(), FakeDecider()
-    ado.add(WorkItem(1, "t", "d", "a", "Bug", (), "u"))
+    store, forge, decider = Store("sqlite://"), FakeForge(), FakeDecider()
+    forge.add(WorkItem(1, "t", "d", "a", "Bug", (), "u"))
     answers = iter(["bug", "clear", "", "nonsense"])
-    n = label_triage(ado, decider, store, 5, lambda _prompt: next(answers))
+    n = label_triage(forge, decider, store, 5, lambda _prompt: next(answers))
     assert n == 2
     assert [g for _, g in store.labels("triage", "kind")] == ["bug"]
     assert store.labels("triage", "size") == []

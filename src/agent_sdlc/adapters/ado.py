@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from agent_sdlc.adapters.errors import ForgeError
 from agent_sdlc.secrets import basic_auth_header
 from agent_sdlc.targets import AdoForgeConfig, IntakeConfig
 from agent_sdlc.types import PrComment, WorkItem
@@ -18,10 +19,6 @@ API = "7.1"
 _FIELDS = ("System.Id,System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria,"
            "Microsoft.VSTS.TCM.ReproSteps,System.Tags,System.WorkItemType")
 _BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "pre"}
-
-
-class AdoError(Exception):
-    pass
 
 
 class _Text(HTMLParser):
@@ -48,7 +45,10 @@ def html_to_text(value: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-class AdoClient:
+class AdoForge:
+    kind = "ado"
+    label_word = "tag"
+
     def __init__(self, cfg: AdoForgeConfig, pat: str, *, intake: IntakeConfig | None = None,
                  base_branch: str = "dev", branch_prefix: str = "agent/",
                  http: httpx.Client | None = None, push_url: str | None = None,
@@ -82,7 +82,7 @@ class AdoClient:
 
     def _check_branch(self, branch: str) -> None:
         if not branch.startswith(self._branch_prefix):
-            raise AdoError(f"refusing ref outside {self._branch_prefix}*: {branch}")
+            raise ForgeError(f"refusing ref outside {self._branch_prefix}*: {branch}")
 
     # work items ------------------------------------------------------------
     def _wiql_ids(self, where: str, order: str) -> list[int]:
@@ -97,6 +97,25 @@ class AdoClient:
             "AND [System.State] NOT IN ('Closed', 'Removed', 'Done')",
             "[System.CreatedDate] ASC")
         return self.get_work_items(ids)
+
+    def get_item(self, id: int) -> WorkItem:
+        [wi] = self.get_work_items([id])
+        return wi
+
+    def comment_item(self, id: int, html: str) -> None:
+        self._req("POST", f"{self._p}/wit/workItems/{id}/comments",
+                  params={"api-version": "7.1-preview.4"}, json={"text": html})
+
+    def has_label(self, id: int, label: str) -> bool:
+        return label in self.get_item(id).tags
+
+    def set_label(self, id: int, label: str, present: bool) -> None:
+        tags = [t for t in self.get_item(id).tags if t != label]
+        if present:
+            tags.append(label)
+        self._req("PATCH", f"{self._p}/wit/workitems/{id}",
+                  json=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(tags)}],
+                  headers={"Content-Type": "application/json-patch+json"})
 
     def list_closed(self, limit: int) -> list[WorkItem]:
         ids = self._wiql_ids("[System.State] IN ('Closed', 'Done')", "[System.ChangedDate] DESC")
@@ -125,25 +144,6 @@ class AdoClient:
                 ))
         return out
 
-    def get_work_item(self, id: int) -> WorkItem:
-        [wi] = self.get_work_items([id])
-        return wi
-
-    def comment_work_item(self, id: int, html_text: str) -> None:
-        self._req("POST", f"{self._p}/wit/workItems/{id}/comments",
-                  params={"api-version": "7.1-preview.4"}, json={"text": html_text})
-
-    def has_tag(self, id: int, tag: str) -> bool:
-        return tag in self.get_work_item(id).tags
-
-    def set_tag(self, id: int, tag: str, present: bool) -> None:
-        tags = [t for t in self.get_work_item(id).tags if t != tag]
-        if present:
-            tags.append(tag)
-        self._req("PATCH", f"{self._p}/wit/workitems/{id}",
-                  json=[{"op": "add", "path": "/fields/System.Tags", "value": "; ".join(tags)}],
-                  headers={"Content-Type": "application/json-patch+json"})
-
     # git & pull requests ---------------------------------------------------
     def push_branch(self, worktree: Path, branch: str) -> None:
         self._check_branch(branch)
@@ -156,9 +156,9 @@ class AdoClient:
             cwd=worktree, capture_output=True, text=True,
             env=git_env())
         if r.returncode != 0:
-            raise AdoError(f"push failed: {r.stderr.strip()}")
+            raise ForgeError(f"push failed: {r.stderr.strip()}")
 
-    def create_pr(self, branch: str, title: str, body: str, work_item_id: int) -> int:
+    def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
         self._check_branch(branch)
         if self._dry_run:
             log.info("dry-run: would open PR %s\n%s", title, body)
@@ -167,11 +167,12 @@ class AdoClient:
             "sourceRefName": f"refs/heads/{branch}",
             "targetRefName": f"refs/heads/{self._base_branch}",
             "title": title, "description": body,
-            "workItemRefs": [{"id": str(work_item_id)}],
+            "workItemRefs": [{"id": str(item_id)}],
         })
         return int(res["pullRequestId"])
 
-    def update_pr(self, pr_id: int, body: str) -> None:
+    def update_pr(self, pr_id: int, body: str, item_id: int) -> None:
+        # item_id is unused: ADO links the work item through workItemRefs on create.
         if self._dry_run:
             log.info("dry-run: would update PR %s description", pr_id)
             return
@@ -205,12 +206,15 @@ class AdoClient:
                                      c["author"].get("displayName", ""), c.get("content", "")))
         return out
 
-    def reply_pr(self, pr_id: int, thread_id: int, parent_comment_id: int, text: str) -> None:
+    def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
         if self._dry_run:
-            log.info("dry-run: would reply to PR %s thread %s: %s", pr_id, thread_id, text)
+            log.info("dry-run: would reply to PR %s thread %s: %s", pr_id, comment.thread_id,
+                     text)
             return
-        self._req("POST", f"{self._repo}/pullRequests/{pr_id}/threads/{thread_id}/comments",
-                  json={"content": text, "parentCommentId": parent_comment_id, "commentType": 1})
+        self._req("POST",
+                  f"{self._repo}/pullRequests/{pr_id}/threads/{comment.thread_id}/comments",
+                  json={"content": text, "parentCommentId": comment.comment_id,
+                        "commentType": 1})
 
     def comment_pr(self, pr_id: int, text: str) -> None:
         if self._dry_run:
@@ -231,3 +235,12 @@ class AdoClient:
         self._req("POST", f"{self._repo}/refs", json=[{
             "name": f"refs/heads/{branch}", "oldObjectId": match[0]["objectId"],
             "newObjectId": "0" * 40}])
+
+    def git_auth_header(self) -> str:
+        return self._auth_header
+
+    def pr_ref(self, pr_id: int) -> str:
+        return f"!{pr_id}"
+
+    def item_ref(self, item_id: int) -> str:
+        return f"AB#{item_id}"

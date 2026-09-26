@@ -76,19 +76,13 @@ def _global_config(path: str) -> GlobalConfig:
 
 def _runtime(cfg: GlobalConfig, target: TargetConfig, store: Store, workspaces: Path,
              dry_run_push: bool, traces: Path | None = None) -> tuple[Any, Any, Any]:
-    from agent_sdlc.adapters.ado import AdoClient
+    from agent_sdlc.adapters.ado import AdoForge
     from agent_sdlc.agents.runner import ClaudeAgentRunner
     from agent_sdlc.decisions.decider import Decider, LayaPredictor
     from agent_sdlc.orchestrator.scheduler import Scheduler
     from agent_sdlc.orchestrator.stages import StageExecutor
     from agent_sdlc.policy import CommandPolicy, PathPolicy
-    from agent_sdlc.secrets import (
-        ADO_PAT,
-        ANTHROPIC_KEY,
-        CLAUDE_TOKEN,
-        basic_auth_header,
-        get_secret,
-    )
+    from agent_sdlc.secrets import ADO_PAT, ANTHROPIC_KEY, CLAUDE_TOKEN, get_secret
     from agent_sdlc.targets import AdoForgeConfig
     from agent_sdlc.workspaces import Workspaces
 
@@ -98,9 +92,10 @@ def _runtime(cfg: GlobalConfig, target: TargetConfig, store: Store, workspaces: 
     else:
         auth_env = {"ANTHROPIC_API_KEY": get_secret(*ANTHROPIC_KEY)}
     assert isinstance(target.forge, AdoForgeConfig)
-    ado = AdoClient(target.forge, pat, intake=target.intake, base_branch=target.repo.base_branch,
-                    branch_prefix=target.repo.branch_prefix, dry_run_push=dry_run_push)
-    ws = Workspaces(workspaces.resolve(), target, git_auth_header=basic_auth_header(pat))
+    forge = AdoForge(target.forge, pat, intake=target.intake,
+                     base_branch=target.repo.base_branch,
+                     branch_prefix=target.repo.branch_prefix, dry_run_push=dry_run_push)
+    ws = Workspaces(workspaces.resolve(), target, git_auth=forge.git_auth_header)
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([*target.repo.install, *target.repo.commands.values()])
     runner = ClaudeAgentRunner(pp, cp, Path("~/.agent-sdlc/claude-config").expanduser(), auth_env,
@@ -108,12 +103,12 @@ def _runtime(cfg: GlobalConfig, target: TargetConfig, store: Store, workspaces: 
                                max_denials=target.limits.max_denials_per_session)
     decider = Decider(LayaPredictor(cfg.laya.model), store.calibration,
                       cfg.laya.default_threshold)
-    executor = StageExecutor(target=target, ado=ado, decider=decider, runner=runner,
+    executor = StageExecutor(target=target, forge=forge, decider=decider, runner=runner,
                              workspaces=ws, path_policy=pp, decisions_for=store.decisions_for,
                              traces=traces)
-    scheduler = Scheduler(target=target, store=store, executor=executor, ado=ado, workspaces=ws,
-                          limits=cfg.limits)
-    return scheduler, ado, decider
+    scheduler = Scheduler(target=target, store=store, executor=executor, forge=forge,
+                          workspaces=ws, limits=cfg.limits)
+    return scheduler, forge, decider
 
 
 def _ago(delta: timedelta) -> str:
@@ -218,8 +213,8 @@ def main(argv: list[str] | None = None) -> int:
                       f"acc={r.accuracy:.3f} mode={r.mode} — {r.message}")
     elif args.cmd == "label":
         if args.gate == "triage" and not args.abandoned:
-            _, ado, decider = _runtime(cfg, target, store, Path(args.workspaces), True, traces)
-            n = label_triage(ado, decider, store, args.limit, input)
+            _, forge, decider = _runtime(cfg, target, store, Path(args.workspaces), True, traces)
+            n = label_triage(forge, decider, store, args.limit, input)
         else:
             n = label_logged(store, args.gate, args.limit, input, abandoned_only=args.abandoned)
         print(f"recorded {n} labels")

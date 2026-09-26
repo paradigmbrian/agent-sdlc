@@ -86,11 +86,11 @@ def _write_log(path: Path, command: str, output: str, code: int) -> str | None:
 
 class Workspaces:
     def __init__(
-        self, root: Path, target: TargetConfig, git_auth_header: str | None = None
+        self, root: Path, target: TargetConfig, git_auth: Callable[[], str] | None = None
     ):
         self._root = root / target.name
         self._t = target
-        self._auth = git_auth_header
+        self._auth = git_auth
         self._base = self._root / "base"
         self.home = self._root / "home"  # scratch HOME for repo commands and agent sessions
         self._cmd_env = safe_env({**_read_env_template(target.repo.env_template),
@@ -104,8 +104,9 @@ class Workspaces:
         check: bool = True,
     ) -> str:
         cmd = ["git"]
-        if auth and self._auth:
-            cmd += ["-c", f"http.extraheader={self._auth}"]
+        if auth and self._auth is not None:
+            # Fetched per call: GitHub installation tokens expire after an hour.
+            cmd += ["-c", f"http.extraheader={self._auth()}"]
         cmd += list(args)
         r = subprocess.run(
             cmd,

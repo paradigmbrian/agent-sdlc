@@ -40,7 +40,7 @@ from agent_sdlc.orchestrator.transitions import (
     park,
 )
 from agent_sdlc.policy import PathPolicy
-from agent_sdlc.ports import AdoPort, AgentRunner, DeciderPort, WorkspacePort
+from agent_sdlc.ports import AgentRunner, DeciderPort, ForgePort, WorkspacePort
 from agent_sdlc.store import LabelInput
 from agent_sdlc.targets import TargetConfig
 from agent_sdlc.types import (
@@ -90,13 +90,13 @@ def _denial_dicts(res: AgentResult) -> list[dict[str, str]]:
 
 
 class StageExecutor:
-    def __init__(self, *, target: TargetConfig, ado: AdoPort, decider: DeciderPort,
+    def __init__(self, *, target: TargetConfig, forge: ForgePort, decider: DeciderPort,
                  runner: AgentRunner, workspaces: WorkspacePort, path_policy: PathPolicy,
                  decisions_for: Callable[[int], list[Decision]],
                  traces: Path | None = None,
                  clock: Callable[[], datetime] | None = None) -> None:
         self._t = target
-        self._ado = ado
+        self._forge = forge
         self._decider = decider
         self._runner = runner
         self._ws = workspaces
@@ -239,12 +239,12 @@ class StageExecutor:
 
     # stages ----------------------------------------------------------------
     async def _triage(self, item: Item) -> StepResult:
-        state = triage_state(self._ado.get_work_item(item.id))
+        state = triage_state(self._forge.get_item(item.id))
         ds = self._decider.decide("triage", state)
         return StepResult(after_triage(ds), decisions=_logged(ds, state))
 
     async def _plan(self, item: Item) -> StepResult:
-        wi = self._ado.get_work_item(item.id)
+        wi = self._forge.get_item(item.id)
         wt = self._ws.create(item.id, item.branch)
         res, events, data = await self._run_agent(
             item, PLANNER, planner_prompt(wi, item.data.get("feedback")), wt, "plan")
@@ -258,7 +258,7 @@ class StageExecutor:
                           {"plan": res.text, "feedback": None, **data}, events=events)
 
     async def _implement(self, item: Item) -> StepResult:
-        wi = self._ado.get_work_item(item.id)
+        wi = self._forge.get_item(item.id)
         wt = self._ws.create(item.id, item.branch)
         self._ws.reset(wt)
         # Resume at implement: pending feedback (e.g. a PR change request) must still apply (I2).
@@ -320,7 +320,7 @@ class StageExecutor:
                           events=events)
 
     async def _review(self, item: Item) -> StepResult:
-        wi = self._ado.get_work_item(item.id)
+        wi = self._forge.get_item(item.id)
         wt = self._ws.create(item.id, item.branch)
         checks = [CommandResult(**c) for c in item.data.get("checks", [])]
         plan = str(item.data.get("plan", ""))
@@ -338,34 +338,34 @@ class StageExecutor:
                           events=events)
 
     async def _pr_open(self, item: Item) -> StepResult:
-        wi = self._ado.get_work_item(item.id)
+        wi = self._forge.get_item(item.id)
         wt = self._ws.create(item.id, item.branch)
         if policy := self._policy_park(wt, "Pre-push check"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
-        self._ado.push_branch(wt, item.branch)
+        self._forge.push_branch(wt, item.branch)
         body = pr_body(item, wi, self._decisions_for(item.id), item.data.get("checks", []),
                        str(item.data.get("review_notes", "")))
         if item.pr_id:
-            self._ado.update_pr(item.pr_id, body)
+            self._forge.update_pr(item.pr_id, body, item.id)
             pr_id = item.pr_id
         else:
-            pr_id = self._ado.create_pr(item.branch, pr_title(wi), body, item.id)
+            pr_id = self._forge.create_pr(item.branch, pr_title(wi), body, item.id)
             if pr_id:  # dry-run returns 0: there is no PR to point at (M6)
-                self._ado.comment_work_item(
+                self._forge.comment_item(
                     item.id, plan_comment_html(str(item.data.get("plan", "")), pr_id))
         return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id)
 
     async def _awaiting(self, item: Item) -> StepResult:
         assert item.pr_id is not None
-        status = self._ado.pr_status(item.pr_id)
+        status = self._forge.pr_status(item.pr_id)
         seen = list(item.data.get("seen_comments", []))
         outcomes: list[CommentOutcome] = []
         logged: list[tuple[Decision, dict[str, Any]]] = []
         labels: list[LabelInput] = []
         events: list[EventInput] = []
-        for c in self._ado.pr_comments(item.pr_id):
+        for c in self._forge.pr_comments(item.pr_id):
             if c.key in seen:
                 continue
             seen.append(c.key)
@@ -383,7 +383,7 @@ class StageExecutor:
             outcomes.append(CommentOutcome(c, intent))
             if intent in ("question", "uncertain") and status == "active":
                 reply = QUESTION_REPLY if intent == "question" else UNCERTAIN_REPLY
-                self._ado.reply_pr(item.pr_id, c.thread_id, c.comment_id, reply)
+                self._forge.reply_pr(item.pr_id, c, reply)
         t = after_pr_poll(status, outcomes, item.pr_rounds, self._t.limits.max_pr_rounds)
         return StepResult(t, decisions=logged, data={"seen_comments": seen}, labels=labels,
                           events=events)

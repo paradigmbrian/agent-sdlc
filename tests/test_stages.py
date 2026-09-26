@@ -18,7 +18,7 @@ from agent_sdlc.types import (
     WorkItem,
 )
 from agent_sdlc.workspaces import Workspaces
-from tests.fakes import FakeAdo, FakeDecider, FakeRunner
+from tests.fakes import FakeDecider, FakeForge, FakeRunner
 
 WI = WorkItem(5, "Add feature", "Please add feature.txt", "feature.txt exists", "Bug",
               ("agent",), "u")
@@ -26,11 +26,11 @@ WI = WorkItem(5, "Add feature", "Please add feature.txt", "feature.txt exists", 
 
 @pytest.fixture
 def parts(tmp_path: Path, target: TargetConfig, origin_repo: Path):  # type: ignore[no-untyped-def]
-    ado = FakeAdo(origin=origin_repo)
+    ado = FakeForge(origin=origin_repo)
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
     decider, runner = FakeDecider(), FakeRunner()
-    ex = StageExecutor(target=target, ado=ado, decider=decider, runner=runner, workspaces=ws,
+    ex = StageExecutor(target=target, forge=ado, decider=decider, runner=runner, workspaces=ws,
                        path_policy=PathPolicy(target.policy.protected_paths),
                        decisions_for=lambda _id: [])
     return ex, ado, ws, decider, runner
@@ -127,7 +127,7 @@ async def test_awaiting_handles_comments(parts) -> None:  # type: ignore[no-unty
     decider.answers["comment"] = {"comment_intent": "question"}
     res = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))
     assert res.transition.to is Stage.IMPLEMENT and "/agent rename it" in res.transition.feedback
-    assert res.data["seen_comments"] == ["1:1", "2:1"]
+    assert res.data["seen_comments"] == ["thread:1:1", "thread:2:1"]
     assert [t for _, t, _ in ado.replies] == [2]
     assert [lab.gold for lab in res.labels] == ["change_request"]
     again = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr, data=res.data))
@@ -168,8 +168,8 @@ async def test_i2_agent_error_retries_then_parks(  # type: ignore[no-untyped-def
     assert res.usage == Usage(2, 10, 1)
 
 
-class DryRunAdo(FakeAdo):
-    def create_pr(self, branch: str, title: str, body: str, work_item_id: int) -> int:
+class DryRunAdo(FakeForge):
+    def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
         return 0
 
 
@@ -179,7 +179,7 @@ async def test_m6_dry_run_does_not_comment_plan(  # type: ignore[no-untyped-def]
     ado = DryRunAdo(origin=origin_repo)
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
-    ex = StageExecutor(target=target, ado=ado, decider=FakeDecider(), runner=FakeRunner(),
+    ex = StageExecutor(target=target, forge=ado, decider=FakeDecider(), runner=FakeRunner(),
                        workspaces=ws, path_policy=PathPolicy(target.policy.protected_paths),
                        decisions_for=lambda _id: [])
     wt = ws.create(5, "agent/5-add-feature")
@@ -195,10 +195,10 @@ async def test_m9_lint_fix_commit_rechecks_diff_limit(  # type: ignore[no-untype
 ) -> None:
     fixer = target.model_copy(update={"repo": target.repo.model_copy(
         update={"commands": {"lint": "seq 1 300 > generated.txt"}})})
-    ado = FakeAdo(origin=origin_repo)
+    ado = FakeForge(origin=origin_repo)
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", fixer)
-    ex = StageExecutor(target=fixer, ado=ado, decider=FakeDecider(), runner=FakeRunner(),
+    ex = StageExecutor(target=fixer, forge=ado, decider=FakeDecider(), runner=FakeRunner(),
                        workspaces=ws, path_policy=PathPolicy(fixer.policy.protected_paths),
                        decisions_for=lambda _id: [])
     res = await ex.run(item(Stage.VERIFY))
@@ -213,11 +213,11 @@ ESCAPE = Denial("Read", "outside_worktree", "path is outside the worktree",
 
 def _executor(tmp_path: Path, target: TargetConfig, origin_repo: Path,
               traces: Path | None = None):  # type: ignore[no-untyped-def]
-    ado = FakeAdo(origin=origin_repo)
+    ado = FakeForge(origin=origin_repo)
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", target)
     runner = FakeRunner()
-    ex = StageExecutor(target=target, ado=ado, decider=FakeDecider(), runner=runner,
+    ex = StageExecutor(target=target, forge=ado, decider=FakeDecider(), runner=runner,
                        workspaces=ws, path_policy=PathPolicy(target.policy.protected_paths),
                        decisions_for=lambda _id: [], traces=traces, clock=lambda: T0)
     return ex, ado, ws, runner

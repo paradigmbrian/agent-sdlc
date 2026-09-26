@@ -5,9 +5,11 @@ import httpx
 import pytest
 import respx
 
-from agent_sdlc.adapters.ado import API, AdoClient, AdoError, html_to_text
+from agent_sdlc.adapters.ado import API, AdoForge, html_to_text
+from agent_sdlc.adapters.errors import ForgeError, redact
 from agent_sdlc.secrets import SecretNotFound, basic_auth_header, get_secret
 from agent_sdlc.targets import AdoForgeConfig, TargetConfig
+from agent_sdlc.types import PrComment
 from agent_sdlc.workspaces import Workspaces
 from tests.conftest import git
 
@@ -19,8 +21,8 @@ SELF_ID = "self-guid"
 
 
 @pytest.fixture
-def client() -> AdoClient:
-    return AdoClient(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")))
+def client() -> AdoForge:
+    return AdoForge(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")))
 
 
 def _wi(
@@ -50,7 +52,7 @@ def test_get_secret_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @respx.mock
-def test_list_intake_queries_tag_and_fetches(client: AdoClient) -> None:
+def test_list_intake_queries_tag_and_fetches(client: AdoForge) -> None:
     wiql = respx.post(f"{PROJ}/wit/wiql").mock(
         return_value=httpx.Response(200, json={"workItems": [{"id": 5}, {"id": 6}]}))
     respx.get(f"{PROJ}/wit/workitems").mock(
@@ -62,7 +64,7 @@ def test_list_intake_queries_tag_and_fetches(client: AdoClient) -> None:
 
 
 @respx.mock
-def test_get_work_items_strips_html(client: AdoClient) -> None:
+def test_get_work_items_strips_html(client: AdoForge) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
         return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent; agent:parked")]}))
     [wi] = client.get_work_items([5])
@@ -73,20 +75,20 @@ def test_get_work_items_strips_html(client: AdoClient) -> None:
 
 
 @respx.mock
-def test_set_tag_add_and_remove(client: AdoClient) -> None:
+def test_set_tag_add_and_remove(client: AdoForge) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
         return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent")]}))
     patch = respx.patch(f"{PROJ}/wit/workitems/5").mock(return_value=httpx.Response(200, json={}))
-    client.set_tag(5, "agent:parked", True)
+    client.set_label(5, "agent:parked", True)
     body = json.loads(patch.calls[0].request.content)
     assert body == [{"op": "add", "path": "/fields/System.Tags", "value": "agent; agent:parked"}]
     assert patch.calls[0].request.headers["content-type"] == "application/json-patch+json"
-    client.set_tag(5, "agent", False)
+    client.set_label(5, "agent", False)
     assert json.loads(patch.calls[1].request.content)[0]["value"] == ""
 
 
 @respx.mock
-def test_create_pr_payload(client: AdoClient) -> None:
+def test_create_pr_payload(client: AdoForge) -> None:
     route = respx.post(f"{REPO}/pullrequests").mock(
         return_value=httpx.Response(201, json={"pullRequestId": 42}))
     assert client.create_pr("agent/5-x", "fix: x", "body", 5) == 42
@@ -96,13 +98,13 @@ def test_create_pr_payload(client: AdoClient) -> None:
     assert sent["workItemRefs"] == [{"id": "5"}]
 
 
-def test_create_pr_refuses_non_agent_branch(client: AdoClient) -> None:
-    with pytest.raises(AdoError):
+def test_create_pr_refuses_non_agent_branch(client: AdoForge) -> None:
+    with pytest.raises(ForgeError):
         client.create_pr("dev", "t", "b", 5)
 
 
 @respx.mock
-def test_pr_comments_skip_self_and_system(client: AdoClient) -> None:
+def test_pr_comments_skip_self_and_system(client: AdoForge) -> None:
     respx.get(f"{BASE}/_apis/connectionData").mock(
         return_value=httpx.Response(200, json={"authenticatedUser": {"id": SELF_ID}}))
     respx.get(f"{REPO}/pullRequests/42/threads").mock(return_value=httpx.Response(200, json={
@@ -126,7 +128,7 @@ def test_pr_comments_skip_self_and_system(client: AdoClient) -> None:
 
 
 @respx.mock
-def test_pr_status_and_delete_branch(client: AdoClient) -> None:
+def test_pr_status_and_delete_branch(client: AdoForge) -> None:
     respx.get(f"{REPO}/pullrequests/42").mock(
         return_value=httpx.Response(200, json={"status": "completed"}))
     assert client.pr_status(42) == "completed"
@@ -139,7 +141,7 @@ def test_pr_status_and_delete_branch(client: AdoClient) -> None:
 
 
 @respx.mock
-def test_list_closed_respects_limit(client: AdoClient) -> None:
+def test_list_closed_respects_limit(client: AdoForge) -> None:
     wiql = respx.post(f"{PROJ}/wit/wiql").mock(
         return_value=httpx.Response(200, json={"workItems": [{"id": 5}, {"id": 6}, {"id": 7}]}))
     workitems = respx.get(f"{PROJ}/wit/workitems").mock(
@@ -152,43 +154,43 @@ def test_list_closed_respects_limit(client: AdoClient) -> None:
 
 
 @respx.mock
-def test_comment_work_item_uses_preview_api(client: AdoClient) -> None:
+def test_comment_work_item_uses_preview_api(client: AdoForge) -> None:
     route = respx.post(f"{PROJ}/wit/workItems/5/comments").mock(
         return_value=httpx.Response(200, json={}))
-    client.comment_work_item(5, "<p>hi</p>")
+    client.comment_item(5, "<p>hi</p>")
     req = route.calls[0].request
     assert req.url.params["api-version"] == "7.1-preview.4"
     assert json.loads(req.content) == {"text": "<p>hi</p>"}
 
 
 @respx.mock
-def test_has_tag_true_and_false(client: AdoClient) -> None:
+def test_has_tag_true_and_false(client: AdoForge) -> None:
     respx.get(f"{PROJ}/wit/workitems").mock(
         return_value=httpx.Response(200, json={"value": [_wi(5, tags="agent; agent:parked")]}))
-    assert client.has_tag(5, "agent:parked") is True
-    assert client.has_tag(5, "nope") is False
+    assert client.has_label(5, "agent:parked") is True
+    assert client.has_label(5, "nope") is False
 
 
 @respx.mock
-def test_update_pr_patches_description(client: AdoClient) -> None:
+def test_update_pr_patches_description(client: AdoForge) -> None:
     route = respx.patch(f"{REPO}/pullrequests/42").mock(return_value=httpx.Response(200, json={}))
-    client.update_pr(42, "new body")
+    client.update_pr(42, "new body", 5)
     req = route.calls[0].request
     assert req.url.params["api-version"] == API
     assert json.loads(req.content) == {"description": "new body"}
 
 
 @respx.mock
-def test_reply_pr_posts_comment(client: AdoClient) -> None:
+def test_reply_pr_posts_comment(client: AdoForge) -> None:
     route = respx.post(f"{REPO}/pullRequests/42/threads/7/comments").mock(
         return_value=httpx.Response(200, json={}))
-    client.reply_pr(42, 7, 3, "thanks")
+    client.reply_pr(42, PrComment(7, 3, "a", "c"), "thanks")
     assert json.loads(route.calls[0].request.content) == {
         "content": "thanks", "parentCommentId": 3, "commentType": 1}
 
 
 @respx.mock
-def test_comment_pr_posts_new_thread(client: AdoClient) -> None:
+def test_comment_pr_posts_new_thread(client: AdoForge) -> None:
     route = respx.post(f"{REPO}/pullRequests/42/threads").mock(
         return_value=httpx.Response(200, json={}))
     client.comment_pr(42, "hello")
@@ -198,10 +200,10 @@ def test_comment_pr_posts_new_thread(client: AdoClient) -> None:
 
 @respx.mock
 def test_dry_run_pr_methods_make_no_http_calls() -> None:
-    client = AdoClient(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")),
+    client = AdoForge(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")),
                        dry_run_push=True)
     client.comment_pr(0, "x")
-    client.reply_pr(0, 1, 1, "x")
+    client.reply_pr(0, PrComment(1, 1, "a", "c"), "x")
     client.delete_branch("agent/5-x")
     assert client.pr_status(0) == "active"
     assert client.pr_comments(0) == []
@@ -214,10 +216,10 @@ def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
     wt = ws.create(5, "agent/5-x")
     (wt / "f.txt").write_text("x")
     ws.commit(wt, "feat: f")
-    client = AdoClient(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo))
+    client = AdoForge(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo))
     client.push_branch(wt, "agent/5-x")
     assert "agent/5-x" in git("branch", "--list", "agent/*", cwd=origin_repo)
-    with pytest.raises(AdoError):
+    with pytest.raises(ForgeError):
         client.push_branch(wt, "dev")
 
 
@@ -225,8 +227,25 @@ def test_push_branch_dry_run_does_nothing(tmp_path: Path, target: TargetConfig,
                                           origin_repo: Path) -> None:
     ws = Workspaces(tmp_path / "w", target)
     wt = ws.create(5, "agent/5-x")
-    client = AdoClient(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo),
+    client = AdoForge(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo),
                        dry_run_push=True)
     client.push_branch(wt, "agent/5-x")
     assert git("branch", "--list", "agent/*", cwd=origin_repo) == ""
     assert client.create_pr("agent/5-x", "t", "b", 5) == 0
+
+
+def test_ado_forge_port_attributes() -> None:
+    client = AdoForge(CFG, "pat", http=httpx.Client(base_url=BASE))
+    assert client.kind == "ado" and client.label_word == "tag"
+    assert client.pr_ref(12) == "!12" and client.item_ref(5) == "AB#5"
+    assert client.git_auth_header() == basic_auth_header("pat")
+
+
+def test_redact_removes_secrets() -> None:
+    assert redact("push failed for ghs_abc and key", ["ghs_abc", ""]) == \
+        "push failed for [redacted] and key"
+
+
+def test_pr_comment_key_includes_kind() -> None:
+    assert PrComment(1, 2, "a", "c").key == "thread:1:2"
+    assert PrComment(0, 9, "a", "c", kind="review").key == "review:0:9"
