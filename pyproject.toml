@@ -13,6 +13,7 @@ dependencies = [
     "keyring>=25.7.0",
     "laya>=0.3.11",
     "pydantic>=2.13.5",
+    "pyjwt[crypto]>=2.15.0",
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.54",
 ]
