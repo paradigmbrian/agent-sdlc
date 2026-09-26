@@ -1,3 +1,4 @@
+import threading
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -173,6 +174,32 @@ def test_labels_record_target(store: Store) -> None:
     store.add_label(LabelInput("triage", "kind", {"bug": 1.0}, "bug", "manual", target="tri"))
     assert store.labels("triage", "kind") == [({"bug": 1.0}, "bug")]
     assert store.label_targets("triage", "kind") == ["tri"]
+
+
+def test_i1_concurrent_daily_usage_upsert_has_no_lost_updates_or_integrity_errors(
+    tmp_path: Path,
+) -> None:
+    """Several target threads, each with their own Store on one file DB, add usage for the
+    same new day at once: the totals must sum exactly and no thread may raise (I1)."""
+    db = f"sqlite:///{tmp_path / 'usage.db'}"
+    Store(db)  # create the schema up front; only _add_usage's race is under test
+    day = date(2026, 9, 30)
+    n = 20
+    errors: list[BaseException] = []
+
+    def add() -> None:
+        try:
+            Store(db).add_daily_usage(day, Usage(1, 10, 5))
+        except BaseException as e:  # noqa: BLE001 - captured to assert none occurred
+            errors.append(e)
+
+    threads = [threading.Thread(target=add) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert Store(db).daily_usage(day) == Usage(n, n * 10, n * 5)
 
 
 def test_file_db_uses_wal_and_busy_timeout(tmp_path: Path) -> None:

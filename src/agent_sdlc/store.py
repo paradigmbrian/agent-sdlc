@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 from typing import Any, Literal
 
 from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint, create_engine, event, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from agent_sdlc.types import (
@@ -407,13 +408,20 @@ class Store:
 
     @staticmethod
     def _add_usage(s: Session, day: date, usage: Usage) -> None:
-        r = s.get(DailyUsageRow, day.isoformat())
-        if r is None:
-            r = DailyUsageRow(day=day.isoformat(), turns=0, input_tokens=0, output_tokens=0)
-            s.add(r)
-        r.turns += usage.turns
-        r.input_tokens += usage.input_tokens
-        r.output_tokens += usage.output_tokens
+        """Atomic upsert (I1): a read-modify-write here races across target threads/processes
+        sharing one SQLite file, causing lost updates or an IntegrityError on a new day."""
+        stmt = sqlite_upsert(DailyUsageRow).values(
+            day=day.isoformat(), turns=usage.turns,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[DailyUsageRow.day],
+            set_={
+                "turns": DailyUsageRow.turns + stmt.excluded.turns,
+                "input_tokens": DailyUsageRow.input_tokens + stmt.excluded.input_tokens,
+                "output_tokens": DailyUsageRow.output_tokens + stmt.excluded.output_tokens,
+            },
+        )
+        s.execute(stmt)
 
     def add_daily_usage(self, day: date, usage: Usage) -> None:
         with self._session() as s, s.begin():
