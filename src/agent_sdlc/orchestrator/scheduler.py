@@ -287,7 +287,9 @@ class Scheduler:
         self._store.save(replace(item, data={**item.data, "parked_tag_set": True}),
                          events=[EventInput("park_tagged")], at=item)
         try:
-            self._forge.comment_item(item.id, park_comment_html(item))
+            self._forge.comment_item(item.id, park_comment_html(
+                item, label_word=self._forge.label_word,
+                parked_label=self._t.intake.parked_label))
             if item.pr_id:
                 self._forge.comment_pr(item.pr_id, f"agent-sdlc parked this item "
                                      f"({item.park_reason}): {item.data.get('park_note', '')}")

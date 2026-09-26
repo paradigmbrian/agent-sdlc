@@ -277,7 +277,7 @@ class StageExecutor:
             return stop
         if failed := self._agent_failed(item, res, events, data):
             return failed
-        self._ws.commit(wt, commit_message(wi, item.pr_rounds))
+        self._ws.commit(wt, commit_message(wi, item.pr_rounds, self._forge.item_ref(wi.id)))
         files = self._ws.changed_files(wt)
         t = after_implement(self._pp.violations(files), bool(files), self._ws.diff_lines(wt),
                             self._t.policy.max_diff_lines)
@@ -345,16 +345,18 @@ class StageExecutor:
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
         self._forge.push_branch(wt, item.branch)
-        body = pr_body(item, wi, self._decisions_for(item.id), item.data.get("checks", []),
+        ref = self._forge.item_ref(wi.id)
+        body = pr_body(item, wi, ref, self._decisions_for(item.id), item.data.get("checks", []),
                        str(item.data.get("review_notes", "")))
         if item.pr_id:
-            self._forge.update_pr(item.pr_id, body, item.id)
+            self._forge.update_pr(item.pr_id, body, wi.id)
             pr_id = item.pr_id
         else:
-            pr_id = self._forge.create_pr(item.branch, pr_title(wi), body, item.id)
+            pr_id = self._forge.create_pr(item.branch, pr_title(wi, ref), body, wi.id)
             if pr_id:  # dry-run returns 0: there is no PR to point at (M6)
                 self._forge.comment_item(
-                    item.id, plan_comment_html(str(item.data.get("plan", "")), pr_id))
+                    wi.id, plan_comment_html(str(item.data.get("plan", "")),
+                                             self._forge.pr_ref(pr_id)))
         return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id)
 
     async def _awaiting(self, item: Item) -> StepResult:
@@ -376,10 +378,12 @@ class StageExecutor:
             events.append(EventInput("pr_comment", {"thread_id": c.thread_id,
                                                     "comment_id": c.comment_id,
                                                     "author": c.author, "intent": intent}))
-            if c.content.strip().lower().startswith("/agent"):
+            slash = c.content.strip().lower().startswith("/agent")
+            if slash or c.changes_requested:
                 d = ds["comment_intent"]
                 labels.append(LabelInput("comment", "comment_intent", d.raw_probs,
-                                         "change_request", "slash_command"))
+                                         "change_request",
+                                         "slash_command" if slash else "changes_requested"))
             outcomes.append(CommentOutcome(c, intent))
             if intent in ("question", "uncertain") and status == "active":
                 reply = QUESTION_REPLY if intent == "question" else UNCERTAIN_REPLY

@@ -111,7 +111,7 @@ class CommentOutcome:
 
 
 def classify_comment(c: PrComment, ds: dict[str, Decision] | None) -> str:
-    if c.content.strip().lower().startswith("/agent"):
+    if c.changes_requested or c.content.strip().lower().startswith("/agent"):
         return "change_request"
     if ds is None:
         return "uncertain"

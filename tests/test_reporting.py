@@ -22,12 +22,13 @@ DENIAL = {"role": "implementer", "tool": "Read", "category": "outside_worktree",
 
 
 def test_pr_title_prefix_by_type() -> None:
-    assert pr_title(WI) == "fix: Approve <button> broken (AB#5)"
-    assert pr_title(WorkItem(6, "Add x", "", "", "User Story", (), "")).startswith("feat: ")
+    assert pr_title(WI, "AB#5") == "fix: Approve <button> broken (AB#5)"
+    assert pr_title(WorkItem(6, "Add x", "", "", "User Story", (), ""), "AB#6").startswith(
+        "feat: ")
 
 
 def test_pr_body_contents() -> None:
-    body = pr_body(ITEM, WI, DEC, CHECKS, "No blocking issues.")
+    body = pr_body(ITEM, WI, "AB#5", DEC, CHECKS, "No blocking issues.")
     assert "AB#5" in body and "1. fix it" in body and "npm test" in body
     assert "risk" in body and "shadow" in body
     assert "12 turns" in body and "34,000 tokens" in body
@@ -35,7 +36,7 @@ def test_pr_body_contents() -> None:
 
 def test_pr_body_truncates_to_ado_limit() -> None:
     long_item = Item(5, "t", "x", "b", Stage.PR_OPEN, data={"plan": "p" * 10000})
-    body = pr_body(long_item, WI, DEC, CHECKS, "r" * 10000)
+    body = pr_body(long_item, WI, "AB#5", DEC, CHECKS, "r" * 10000)
     assert len(body) <= MAX_PR_DESCRIPTION
     assert "truncated" in body
 
@@ -78,11 +79,28 @@ def test_park_comment_gate_park_from_implement() -> None:
 
 
 def test_plan_comment_and_commit_message() -> None:
-    assert "PR !42" in plan_comment_html("<b>x</b>", 42)
-    assert "&lt;b&gt;" in plan_comment_html("<b>x</b>", 42)
-    msg = commit_message(WI, 0)
+    assert "PR !42" in plan_comment_html("<b>x</b>", "!42")
+    assert "&lt;b&gt;" in plan_comment_html("<b>x</b>", "!42")
+    msg = commit_message(WI, 0, "AB#5")
     assert msg.startswith("fix: Approve <button> broken") and "AB#5" in msg
     assert "Co-Authored-By" not in msg
+
+
+def test_github_wording() -> None:
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.RED,
+                parked_from=Stage.VERIFY, data={"park_note": "red"})
+    h = park_comment_html(item, label_word="label", parked_label="agent:parked")
+    assert "<code>agent:parked</code> label" in h and " tag" not in h
+    assert "for PR #42" in plan_comment_html("p", "#42")
+    assert pr_title(WI, "#5") == "fix: Approve <button> broken (#5)"
+    assert commit_message(WI, 0, "#5").endswith("\n\n#5")
+    assert pr_body(ITEM, WI, "#5", DEC, CHECKS, "").startswith("Automated change for #5 ")
+
+
+def test_custom_parked_label_is_escaped() -> None:
+    item = Item(5, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.RED,
+                parked_from=Stage.VERIFY, data={"park_note": "n"})
+    assert "<code>needs&lt;me&gt;</code> tag" in park_comment_html(item, parked_label="needs<me>")
 
 
 # --- final review fix wave ---------------------------------------------------------------
@@ -107,7 +125,7 @@ def test_i3_review_park_comment_includes_escaped_review_notes() -> None:
 
 def test_i4_pr_body_shows_cache_reads_separately() -> None:
     item = replace(ITEM, usage=Usage(12, 30000, 4000, cache_read_tokens=500000))
-    body = pr_body(item, WI, DEC, CHECKS, "")
+    body = pr_body(item, WI, "AB#5", DEC, CHECKS, "")
     assert "34,000 tokens" in body and "500,000 cache-read tokens" in body
 
 
@@ -146,10 +164,10 @@ def test_park_comment_policy_lists_last_denials() -> None:
 def test_pr_body_lists_blocked_tool_calls() -> None:
     item = replace(ITEM, data={**ITEM.data, "denial_counts": {"implementer": 2, "planner": 1},
                                "denials": [DENIAL]})
-    body = pr_body(item, WI, DEC, CHECKS, "notes")
+    body = pr_body(item, WI, "AB#5", DEC, CHECKS, "notes")
     assert "## Blocked tool calls\n3 blocked (implementer: 2, planner: 1)" in body
     assert "- implementer `Read` [outside_worktree]: path is outside the worktree" in body
-    assert "## Blocked tool calls" not in pr_body(ITEM, WI, DEC, CHECKS, "notes")
+    assert "## Blocked tool calls" not in pr_body(ITEM, WI, "AB#5", DEC, CHECKS, "notes")
 
 
 def test_park_comment_manifest_names_resume_stage() -> None:

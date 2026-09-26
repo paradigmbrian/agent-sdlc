@@ -41,13 +41,13 @@ def _denials_md(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def pr_title(wi: WorkItem) -> str:
-    return f"{_PREFIX.get(wi.work_item_type, 'feat')}: {wi.title} (AB#{wi.id})"[:400]
+def pr_title(wi: WorkItem, ref: str) -> str:
+    return f"{_PREFIX.get(wi.work_item_type, 'feat')}: {wi.title} ({ref})"[:400]
 
 
-def commit_message(wi: WorkItem, round_: int) -> str:
+def commit_message(wi: WorkItem, round_: int, ref: str) -> str:
     suffix = f" (revision {round_})" if round_ else ""
-    return f"{_PREFIX.get(wi.work_item_type, 'feat')}: {wi.title}{suffix}\n\nAB#{wi.id}"
+    return f"{_PREFIX.get(wi.work_item_type, 'feat')}: {wi.title}{suffix}\n\n{ref}"
 
 
 def _decision_line(d: Decision) -> str:
@@ -55,8 +55,8 @@ def _decision_line(d: Decision) -> str:
     return f"| {d.gate}.{d.question} | {d.answer} | {d.confidence:.2f}{flag} |"
 
 
-def pr_body(item: Item, wi: WorkItem, decisions: list[Decision], checks: list[dict[str, Any]],
-            review_notes: str) -> str:
+def pr_body(item: Item, wi: WorkItem, ref: str, decisions: list[Decision],
+            checks: list[dict[str, Any]], review_notes: str) -> str:
     u = item.usage
     check_lines = "\n".join(
         f"- {'✅' if c['exit_code'] == 0 else '❌'} `{c['command']}` ({c['duration_s']}s)"
@@ -66,7 +66,7 @@ def pr_body(item: Item, wi: WorkItem, decisions: list[Decision], checks: list[di
         latest[f"{d.gate}.{d.question}"] = d
     note = item.data.get("note") or ""
     parts = [
-        f"Automated change for AB#{wi.id} by agent-sdlc. **Human review required before merge.**",
+        f"Automated change for {ref} by agent-sdlc. **Human review required before merge.**",
         f"> {note}" if note else "",
         "## Checks\n" + (check_lines or "(none)"),
         "## Laya decisions\n| gate | answer | confidence |\n|---|---|---|\n"
@@ -84,10 +84,12 @@ def pr_body(item: Item, wi: WorkItem, decisions: list[Decision], checks: list[di
     return body
 
 
-def park_comment_html(item: Item) -> str:
+def park_comment_html(item: Item, *, label_word: str = "tag",
+                      parked_label: str = "agent:parked") -> str:
     reason = item.park_reason.value if item.park_reason else "unknown"
     stage = item.parked_from.value if item.parked_from else "unknown"
     note = html.escape(str(item.data.get("park_note", "")))
+    lab = f"<code>{html.escape(parked_label)}</code> {label_word}"
 
     # Determine guidance based on park type
     is_gate_park = item.park_reason in GATE_PARKS
@@ -95,19 +97,17 @@ def park_comment_html(item: Item) -> str:
 
     if item.park_reason is ParkReason.MANIFEST:
         resume = html.escape(str(item.data.get("manifest_resume", Stage.VERIFY.value)))
-        guidance = ("Removing the <code>agent:parked</code> tag approves these dependency "
+        guidance = (f"Removing the {lab} approves these dependency "
                     f"changes; install and {resume} will run with them.")
     elif is_gate_park and is_gate_stage and item.parked_from is not None:
         next_stages = {Stage.TRIAGE: "plan", Stage.PLAN: "implement", Stage.REVIEW: "pr_open"}
         next_stage = next_stages.get(item.parked_from, "unknown")
-        guidance = (f"To continue, update the item if needed and remove the "
-                    f"<code>agent:parked</code> tag to approve proceeding to the <code>{next_stage}"
-                    f"</code> stage.")
+        guidance = (f"To continue, update the item if needed and remove the {lab} to approve "
+                    f"proceeding to the <code>{next_stage}</code> stage.")
     else:
         retry = "implement" if item.park_reason is ParkReason.PR_ROUNDS else stage
-        guidance = (f"To continue, update the item if needed and remove the "
-                    f"<code>agent:parked</code> tag to retry the <code>{retry}</code> stage with "
-                    f"fresh retry counters.")
+        guidance = (f"To continue, update the item if needed and remove the {lab} to retry the "
+                    f"<code>{retry}</code> stage with fresh retry counters.")
 
     return (f"<p><b>agent-sdlc parked this item</b> at stage <code>{stage}</code> "
             f"(reason: <code>{reason}</code>).</p><pre>{note}</pre>"
@@ -132,5 +132,6 @@ def _park_detail(item: Item) -> str:
     return f"<p><b>{title}</b>:</p><pre>{html.escape(text)}</pre>"
 
 
-def plan_comment_html(plan: str, pr_id: int) -> str:
-    return f"<p><b>agent-sdlc plan</b> for PR !{pr_id}:</p><pre>{html.escape(plan)}</pre>"
+def plan_comment_html(plan: str, pr_ref: str) -> str:
+    return (f"<p><b>agent-sdlc plan</b> for PR {html.escape(pr_ref)}:</p>"
+            f"<pre>{html.escape(plan)}</pre>")

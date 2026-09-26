@@ -17,6 +17,7 @@ from agent_sdlc.orchestrator.transitions import (
     requeue,
 )
 from agent_sdlc.types import CommandResult, Decision, Item, ParkReason, PrComment, Stage
+from tests.fakes import decision
 
 
 def d(q: str, answer: str, actionable: bool = True, conf: float = 0.9) -> Decision:
@@ -94,6 +95,19 @@ def test_classify_comment() -> None:
     assert result == "question"
     unsure = {"comment_intent": d("comment_intent", "change_request", actionable=False)}
     assert classify_comment(plain, unsure) == "uncertain"
+
+
+def test_changes_requested_review_is_always_a_change_request() -> None:
+    c = PrComment(0, 9, "brian", "(changes requested with no summary)", kind="review",
+                  changes_requested=True)
+    assert classify_comment(c, None) == "change_request"
+    noise = {"comment_intent": decision("comment", "comment_intent", "noise")}
+    assert classify_comment(c, noise) == "change_request"
+
+
+def test_slash_agent_in_a_review_body_is_a_change_request() -> None:
+    c = PrComment(0, 9, "brian", "/agent rename the helper", kind="review")
+    assert classify_comment(c, None) == "change_request"
 
 
 def test_pr_poll_transitions() -> None:

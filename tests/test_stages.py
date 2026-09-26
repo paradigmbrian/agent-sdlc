@@ -482,3 +482,16 @@ async def test_f1_lockfile_only_change_shows_full_diff(  # type: ignore[no-untyp
     diff = res.data["manifest_diff"]
     assert diff.startswith("diff --git a/package-lock.json b/package-lock.json")
     assert any(line.startswith("+") and "left-pad" in line for line in diff.splitlines())
+
+
+async def test_changes_requested_review_labels_with_its_own_source(  # type: ignore[no-untyped-def]
+    parts
+) -> None:
+    ex, ado, *_ = parts
+    pr = ado.create_pr("agent/5-add-feature", "t", "b", 5)
+    ado.pr_threads[pr].append(PrComment(0, 1, "brian", "(changes requested with no summary)",
+                                        kind="review", changes_requested=True))
+    res = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))
+    assert res.transition.to is Stage.IMPLEMENT
+    assert [(lab.gold, lab.source) for lab in res.labels] == [
+        ("change_request", "changes_requested")]
