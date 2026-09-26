@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
 
-from sqlalchemy import JSON, ForeignKey, String, create_engine, select
+from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint, create_engine, event, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 from agent_sdlc.types import (
@@ -39,8 +39,10 @@ class Base(DeclarativeBase):
 
 class ItemRow(Base):
     __tablename__ = "items"
-    id: Mapped[int] = mapped_column(primary_key=True)
+    __table_args__ = (UniqueConstraint("target", "external_id", name="uq_items_target_external"),)
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     target: Mapped[str] = mapped_column(String(100))
+    external_id: Mapped[int]
     title: Mapped[str]
     branch: Mapped[str]
     stage: Mapped[str]
@@ -82,6 +84,7 @@ class LabelRow(Base):
     gold: Mapped[str]
     source: Mapped[str]
     decision_id: Mapped[int | None]
+    target: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(default=_now)
 
 
@@ -149,6 +152,7 @@ class LabelInput:
     gold: str
     source: str
     decision_id: int | None = None
+    target: str | None = None
 
 
 def _to_item(r: ItemRow) -> Item:
@@ -158,7 +162,7 @@ def _to_item(r: ItemRow) -> Item:
         parked_from=Stage(r.parked_from) if r.parked_from else None,
         attempt=r.attempt, replans=r.replans, pr_rounds=r.pr_rounds,
         infra_failures=r.infra_failures, pr_id=r.pr_id, data=dict(r.data or {}),
-        usage=Usage.from_dict(r.usage),
+        usage=Usage.from_dict(r.usage), external_id=r.external_id,
     )
 
 
@@ -167,22 +171,36 @@ def _to_decision(r: DecisionRow) -> Decision:
                     r.confidence, r.shadow, r.actionable)
 
 
+def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
+    cur = dbapi_conn.cursor()
+    cur.execute("PRAGMA journal_mode=WAL")   # several target threads write (spec §4.1)
+    cur.execute("PRAGMA busy_timeout=30000")
+    cur.close()
+
+
 class Store:
     def __init__(self, url: str) -> None:
         self._engine = create_engine(url)
+        if self._engine.dialect.name == "sqlite":
+            event.listen(self._engine, "connect", _sqlite_pragmas)
         Base.metadata.create_all(self._engine)
 
     def _session(self) -> Session:
         return Session(self._engine, expire_on_commit=False)
 
     # items -----------------------------------------------------------------
-    def add_item(self, target: str, wi: WorkItem, branch: str) -> bool:
+    def add_item(self, target: str, wi: WorkItem, branch: str) -> Item | None:
+        """The new item, or None when the target already tracks this external id."""
         with self._session() as s, s.begin():
-            if s.get(ItemRow, wi.id) is not None:
-                return False
-            s.add(ItemRow(id=wi.id, target=target, title=wi.title, branch=branch,
-                          stage=Stage.TRIAGE.value, data={}, usage={}))
-            return True
+            q = select(ItemRow.id).where(ItemRow.target == target,
+                                         ItemRow.external_id == wi.id)
+            if s.scalars(q).first() is not None:
+                return None
+            row = ItemRow(target=target, external_id=wi.id, title=wi.title, branch=branch,
+                          stage=Stage.TRIAGE.value, data={}, usage={})
+            s.add(row)
+            s.flush()
+            return _to_item(row)
 
     def get(self, item_id: int) -> Item:
         with self._session() as s:
@@ -190,6 +208,23 @@ class Store:
             if row is None:
                 raise KeyError(item_id)
             return _to_item(row)
+
+    def get_by_ref(self, target: str, external_id: int) -> Item:
+        with self._session() as s:
+            q = select(ItemRow).where(ItemRow.target == target,
+                                      ItemRow.external_id == external_id)
+            row = s.scalars(q).first()
+            if row is None:
+                raise KeyError(f"{target}#{external_id}")
+            return _to_item(row)
+
+    def find_external(self, external_id: int,
+                      targets: Iterable[str] | None = None) -> list[Item]:
+        with self._session() as s:
+            q = select(ItemRow).where(ItemRow.external_id == external_id)
+            if targets is not None:
+                q = q.where(ItemRow.target.in_(list(targets)))
+            return [_to_item(r) for r in s.scalars(q.order_by(ItemRow.target))]
 
     def items(self, target: str, stages: Iterable[Stage] | None = None) -> list[Item]:
         with self._session() as s:
@@ -254,7 +289,8 @@ class Store:
     @staticmethod
     def _label_row(lab: LabelInput) -> LabelRow:
         return LabelRow(gate=lab.gate, question=lab.question, raw_probs=lab.raw_probs,
-                        gold=lab.gold, source=lab.source, decision_id=lab.decision_id)
+                        gold=lab.gold, source=lab.source, decision_id=lab.decision_id,
+                        target=lab.target)
 
     def add_label(self, label: LabelInput) -> None:
         with self._session() as s, s.begin():
@@ -265,6 +301,13 @@ class Store:
             q = (select(LabelRow).where(LabelRow.gate == gate, LabelRow.question == question)
                  .order_by(LabelRow.id))
             return [(dict(r.raw_probs), r.gold) for r in s.scalars(q)]
+
+    def label_targets(self, gate: str, question: str) -> list[str | None]:
+        with self._session() as s:
+            q = (select(LabelRow.target).where(LabelRow.gate == gate,
+                                               LabelRow.question == question)
+                 .order_by(LabelRow.id))
+            return list(s.scalars(q))
 
     def labeled_decisions(self, gate: str, question: str) -> list[tuple[str, str]]:
         """(logged answer, human gold) for every label tied to a logged decision."""

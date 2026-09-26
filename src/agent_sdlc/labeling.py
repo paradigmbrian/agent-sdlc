@@ -59,7 +59,7 @@ def _ask_gold(ask: Callable[[str], str], question: str, keys: list[str], hint: s
 
 
 def label_triage(forge: ForgePort, decider: DeciderPort, store: Store, limit: int,
-                 ask: Callable[[str], str]) -> int:
+                 ask: Callable[[str], str], target: str | None = None) -> int:
     count = 0
     for wi in forge.list_closed(limit):
         print(f"\n=== #{wi.id} ===\n{work_item_text(wi, 2000)}")
@@ -67,7 +67,8 @@ def label_triage(forge: ForgePort, decider: DeciderPort, store: Store, limit: in
         for q, d in ds.items():
             gold = _ask_gold(ask, q, option_keys(GATES["triage"][q]), d.answer)
             if gold is not None:
-                store.add_label(LabelInput("triage", q, d.raw_probs, gold, "manual"))
+                store.add_label(LabelInput("triage", q, d.raw_probs, gold, "manual",
+                                           target=target))
                 count += 1
     return count
 
@@ -97,7 +98,8 @@ def label_logged(store: Store, gate: str, limit: int, ask: Callable[[str], str],
     for decision_id, item_id, d, state in rows:
         if item_id not in shown:
             shown.add(item_id)
-            print(f"\n##### item #{item_id} (PR abandoned) #####")
+            it = store.get(item_id)
+            print(f"\n##### {it.target}#{it.external_id} (PR abandoned) #####")
             for st in store.decision_states(item_id, "comment"):
                 print(f"--- PR comment ---\n{str(st.get('comment', ''))[:1500]}")
         count += _label_one(store, gate, decision_id, d, state, ask)

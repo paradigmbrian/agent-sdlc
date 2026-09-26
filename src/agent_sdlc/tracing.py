@@ -86,7 +86,7 @@ def _transcript_lines(path: str) -> list[str]:
 def render_trace(store: Store, item_id: int, full: bool = False) -> str:
     """Chronological timeline of an item's events and Laya decisions (spec §6.1)."""
     item = store.get(item_id)
-    head = f'#{item.id} "{item.title}"   stage: {item.stage.value}'
+    head = f'{item.target}#{item.external_id} "{item.title}"   stage: {item.stage.value}'
     if item.park_reason:
         src = item.parked_from.value if item.parked_from else "?"
         head += f" ({item.park_reason.value} from {src})"

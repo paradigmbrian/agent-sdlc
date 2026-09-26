@@ -65,6 +65,10 @@ def in_flight(items: list[Item], limit: int) -> list[Item]:
     return ordered[:limit]
 
 
+def _ref(item: Item) -> str:
+    return f"{item.target}#{item.external_id}"
+
+
 class Scheduler:
     def __init__(self, *, target: TargetConfig, store: Store, executor: Executor,
                  forge: ForgePort, workspaces: WorkspacePort,
@@ -126,7 +130,7 @@ class Scheduler:
         for item in active:
             last = self._store.last_event_ts(item.id)
             if last is not None and now - last > limit:
-                with log_context(item.id, item.stage.value):
+                with log_context(_ref(item), item.stage.value):
                     log.warning("stale: no event for %s", now - last)
 
     # intake & requeue ------------------------------------------------------
@@ -140,10 +144,10 @@ class Scheduler:
             if self._t.intake.parked_label in wi.tags:
                 continue
             branch = f"{self._t.repo.branch_prefix}{wi.id}-{slugify(wi.title)}"
-            if self._store.add_item(self._t.name, wi, branch):
-                self._store.add_event("intake", {"title": wi.title, "branch": branch},
-                                      item=self._store.get(wi.id))
-                log.info("intake: #%s %s", wi.id, wi.title)
+            item = self._store.add_item(self._t.name, wi, branch)
+            if item is not None:
+                self._store.add_event("intake", {"title": wi.title, "branch": branch}, item=item)
+                log.info("intake: %s#%s %s", self._t.name, wi.id, wi.title)
 
     def _requeue_untagged(self) -> None:
         for item in self._store.items(self._t.name, [Stage.PARKED]):
@@ -153,9 +157,9 @@ class Scheduler:
                 self._park_side_effects(item)
                 continue
             try:
-                tagged = self._forge.has_label(item.id, self._t.intake.parked_label)
+                tagged = self._forge.has_label(item.external_id, self._t.intake.parked_label)
             except _INFRA_ERRORS as e:
-                log.warning("has_label failed for #%s; leaving parked this tick: %s", item.id, e)
+                log.warning("has_label failed for %s; leaving parked this tick: %s", _ref(item), e)
                 continue
             if not tagged:
                 self.requeue_item(item.id)
@@ -167,7 +171,7 @@ class Scheduler:
         for stage in stages:
             gate, golds = APPROVAL_LABELS[stage]
             latest = {d.question: d for d in self._store.decisions_for(item_id, gate)}
-            out += [LabelInput(gate, q, latest[q].raw_probs, gold, source)
+            out += [LabelInput(gate, q, latest[q].raw_probs, gold, source, target=self._t.name)
                     for q, gold in golds.items() if q in latest]
         return out
 
@@ -183,18 +187,19 @@ class Scheduler:
         self._store.commit_step(new, [], Usage(), self._clock().date(), labels,
                                 events=[event], at=item)
         try:
-            self._forge.set_label(item.id, self._t.intake.parked_label, False)
+            self._forge.set_label(item.external_id, self._t.intake.parked_label, False)
         except _INFRA_ERRORS as e:
-            log.warning("clearing parked tag failed for #%s (idempotent cleanup): %s", item.id, e)
-        log.info("requeued #%s -> %s", item.id, new.stage)
+            log.warning("clearing parked tag failed for %s (idempotent cleanup): %s",
+                       _ref(item), e)
+        log.info("requeued %s -> %s", _ref(item), new.stage)
         return new
 
     # one step --------------------------------------------------------------
     async def _step(self, item: Item, now: datetime) -> None:
         # Lets `status` tell a long step from a dead loop (I5).
-        self._store.set_flag("busy", f"{item.id}|{item.stage.value}|{now.isoformat()}")
+        self._store.set_flag("busy", f"{item.external_id}|{item.stage.value}|{now.isoformat()}")
         try:
-            with log_context(item.id, item.stage.value):
+            with log_context(_ref(item), item.stage.value):
                 await self._run_step(item, now)
         finally:
             self._store.set_flag("busy", None)
@@ -227,7 +232,7 @@ class Scheduler:
             self._infra_failure(item, now, e)
             return
         except Exception as e:  # any per-item error backs off and eventually parks (I1)
-            log.exception("step failed for #%s", item.id)
+            log.exception("step failed for %s", _ref(item))
             self._infra_failure(item, now, e)
             return
         new = apply_transition(item, res.transition)
@@ -259,7 +264,7 @@ class Scheduler:
 
     def _infra_failure(self, item: Item, now: datetime, err: Exception) -> None:
         n = item.infra_failures + 1
-        log.warning("infra failure %s on #%s: %s", n, item.id, err)
+        log.warning("infra failure %s on %s: %s", n, _ref(item), err)
         events = _partial_events(getattr(err, "partial", None)) + [
             EventInput("infra_failure", {"n": n, "error": f"{type(err).__name__}: {err}"[:2000]})]
         if n >= _MAX_INFRA_FAILURES:
@@ -278,23 +283,23 @@ class Scheduler:
         """Tag first, and record that the tag is set, before commenting: only a confirmed tag
         makes its later removal mean "a human approved" (C1)."""
         try:
-            self._forge.set_label(item.id, self._t.intake.parked_label, True)
+            self._forge.set_label(item.external_id, self._t.intake.parked_label, True)
         except _INFRA_ERRORS as e:
-            log.exception("setting the parked tag failed for #%s; will retry", item.id)
+            log.exception("setting the parked tag failed for %s; will retry", _ref(item))
             self._store.add_event("park_side_effect_failed",
                                   {"step": "tag", "error": str(e)[:500]}, item=item)
             return
         self._store.save(replace(item, data={**item.data, "parked_tag_set": True}),
                          events=[EventInput("park_tagged")], at=item)
         try:
-            self._forge.comment_item(item.id, park_comment_html(
+            self._forge.comment_item(item.external_id, park_comment_html(
                 item, label_word=self._forge.label_word,
                 parked_label=self._t.intake.parked_label))
             if item.pr_id:
                 self._forge.comment_pr(item.pr_id, f"agent-sdlc parked this item "
                                      f"({item.park_reason}): {item.data.get('park_note', '')}")
         except _INFRA_ERRORS as e:
-            log.exception("park comments failed for #%s", item.id)
+            log.exception("park comments failed for %s", _ref(item))
             self._store.add_event("park_side_effect_failed",
                                   {"step": "comment", "error": str(e)[:500]}, item=item)
 
@@ -304,8 +309,8 @@ class Scheduler:
             return
         try:
             if item.stage in (Stage.DONE, Stage.CLOSED):
-                self._ws.remove(item.id, item.branch)
+                self._ws.remove(item.external_id, item.branch)
                 if item.pr_id:
                     self._forge.delete_branch(item.branch)
         except _INFRA_ERRORS:
-            log.exception("side effects failed for #%s", item.id)
+            log.exception("side effects failed for %s", _ref(item))

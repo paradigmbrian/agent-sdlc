@@ -37,7 +37,8 @@ def parts(tmp_path: Path, target: TargetConfig, origin_repo: Path):  # type: ign
 
 
 def item(stage: Stage, **kw) -> Item:  # type: ignore[no-untyped-def]
-    return replace(Item(5, "fixture", WI.title, "agent/5-add-feature", stage), **kw)
+    return replace(Item(5, "fixture", WI.title, "agent/5-add-feature", stage, external_id=5),
+                   **kw)
 
 
 async def test_triage_logs_decisions(parts) -> None:  # type: ignore[no-untyped-def]
@@ -235,7 +236,8 @@ async def test_agent_session_events_and_trace_path(  # type: ignore[no-untyped-d
     res = await ex.run(item(Stage.PLAN))
     assert [e.kind for e in res.events] == ["agent_session"]
     assert res.events[0].payload["role"] == "planner"
-    assert runner.traces == [tmp_path / "traces" / "5" / "20261002T190412-plan-a0-planner.jsonl"]
+    assert runner.traces == [
+        tmp_path / "traces" / "fixture" / "5" / "20261002T190412-plan-a0-planner.jsonl"]
 
 
 async def test_token_budget_passed_to_runner(parts) -> None:  # type: ignore[no-untyped-def]

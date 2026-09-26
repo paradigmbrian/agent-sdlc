@@ -148,6 +148,7 @@ class Item:
     pr_id: int | None = None
     data: dict[str, Any] = field(default_factory=dict)
     usage: Usage = Usage()
+    external_id: int = 0   # the forge's item number; set by the Store (0 only in test fixtures)
 
 
 # Denial categories that stop an agent session immediately (spec §5.3).

@@ -122,7 +122,7 @@ class StageExecutor:
         if self._traces is None:
             return None
         ts = self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%S")
-        return (self._traces / str(item.id)
+        return (self._traces / item.target / str(item.external_id)
                 / f"{ts}-{item.stage.value}-a{item.attempt}-{name}.{ext}")
 
     async def _run_agent(self, item: Item, role: Role, prompt: str, wt: Path,
@@ -239,13 +239,13 @@ class StageExecutor:
 
     # stages ----------------------------------------------------------------
     async def _triage(self, item: Item) -> StepResult:
-        state = triage_state(self._forge.get_item(item.id))
+        state = triage_state(self._forge.get_item(item.external_id))
         ds = self._decider.decide("triage", state)
         return StepResult(after_triage(ds), decisions=_logged(ds, state))
 
     async def _plan(self, item: Item) -> StepResult:
-        wi = self._forge.get_item(item.id)
-        wt = self._ws.create(item.id, item.branch)
+        wi = self._forge.get_item(item.external_id)
+        wt = self._ws.create(item.external_id, item.branch)
         res, events, data = await self._run_agent(
             item, PLANNER, planner_prompt(wi, item.data.get("feedback")), wt, "plan")
         if stop := self._stopped(res, events, data):
@@ -258,8 +258,8 @@ class StageExecutor:
                           {"plan": res.text, "feedback": None, **data}, events=events)
 
     async def _implement(self, item: Item) -> StepResult:
-        wi = self._forge.get_item(item.id)
-        wt = self._ws.create(item.id, item.branch)
+        wi = self._forge.get_item(item.external_id)
+        wt = self._ws.create(item.external_id, item.branch)
         self._ws.reset(wt)
         # Resume at implement: pending feedback (e.g. a PR change request) must still apply (I2).
         if gate := self._manifest_gate(item, wt, Stage.IMPLEMENT):
@@ -287,7 +287,7 @@ class StageExecutor:
         return StepResult(t, res.usage, data={"feedback": None, **data}, events=events)
 
     async def _verify(self, item: Item) -> StepResult:
-        wt = self._ws.create(item.id, item.branch)
+        wt = self._ws.create(item.external_id, item.branch)
         if policy := self._policy_park(wt, "Verify"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
@@ -320,8 +320,8 @@ class StageExecutor:
                           events=events)
 
     async def _review(self, item: Item) -> StepResult:
-        wi = self._forge.get_item(item.id)
-        wt = self._ws.create(item.id, item.branch)
+        wi = self._forge.get_item(item.external_id)
+        wt = self._ws.create(item.external_id, item.branch)
         checks = [CommandResult(**c) for c in item.data.get("checks", [])]
         plan = str(item.data.get("plan", ""))
         res, events, data = await self._run_agent(
@@ -338,8 +338,8 @@ class StageExecutor:
                           events=events)
 
     async def _pr_open(self, item: Item) -> StepResult:
-        wi = self._forge.get_item(item.id)
-        wt = self._ws.create(item.id, item.branch)
+        wi = self._forge.get_item(item.external_id)
+        wt = self._ws.create(item.external_id, item.branch)
         if policy := self._policy_park(wt, "Pre-push check"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
@@ -383,7 +383,8 @@ class StageExecutor:
                 d = ds["comment_intent"]
                 labels.append(LabelInput("comment", "comment_intent", d.raw_probs,
                                          "change_request",
-                                         "slash_command" if slash else "changes_requested"))
+                                         "slash_command" if slash else "changes_requested",
+                                         target=item.target))
             outcomes.append(CommentOutcome(c, intent))
             if intent in ("question", "uncertain") and status == "active":
                 reply = QUESTION_REPLY if intent == "question" else UNCERTAIN_REPLY

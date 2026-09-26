@@ -20,7 +20,7 @@ from agent_sdlc.tracing import render_trace
 from agent_sdlc.types import ACTIVE_STAGES, EventInput
 
 _STATE = Path("~/.agent-sdlc").expanduser()
-_DEFAULT_DB = f"sqlite:///{_STATE / 'state.db'}"
+_DEFAULT_DB = f"sqlite:///{_STATE / 'agent-sdlc-v2.db'}"
 # Defaults resolve from the project root, not the CWD (M12).
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -167,7 +167,7 @@ def _status(target: TargetConfig, store: Store) -> None:
             status = " queued"
         else:
             status = ""
-        print(f"#{i.id:<6} {i.stage.value:<15}{reason}{pr}  attempt {i.attempt}  "
+        print(f"#{i.external_id:<6} {i.stage.value:<15}{reason}{pr}  attempt {i.attempt}  "
               f"{i.usage.tokens:,} tok  {seen}  denied {denied}{status}  {i.title[:60]}")
 
 
@@ -190,20 +190,21 @@ def main(argv: list[str] | None = None) -> int:
         _status(target, store)
     elif args.cmd == "trace":
         try:
-            print(render_trace(store, args.item_id, args.full))
+            item = store.get_by_ref(target.name, args.item_id)
+            print(render_trace(store, item.id, args.full))
         except KeyError:
             print(f"no item #{args.item_id}")
             return 1
     elif args.cmd == "requeue":
+        item = store.get_by_ref(target.name, args.item_id)
         if args.local:
-            item = store.get(args.item_id)
             new = requeue(item)
             store.save(new, events=[EventInput("requeue", {
                 "from_reason": item.park_reason.value if item.park_reason else None,
                 "to": new.stage.value, "approved": False, "local": True})], at=item)
         else:
             scheduler, *_ = _runtime(cfg, target, store, Path(args.workspaces), False, traces)
-            scheduler.requeue_item(args.item_id)
+            scheduler.requeue_item(item.id)
     elif args.cmd == "calibrate":
         gates = [args.gate] if args.gate else sorted(GATES)
         for gate in gates:
@@ -214,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "label":
         if args.gate == "triage" and not args.abandoned:
             _, forge, decider = _runtime(cfg, target, store, Path(args.workspaces), True, traces)
-            n = label_triage(forge, decider, store, args.limit, input)
+            n = label_triage(forge, decider, store, args.limit, input, target=target.name)
         else:
             n = label_logged(store, args.gate, args.limit, input, abandoned_only=args.abandoned)
         print(f"recorded {n} labels")

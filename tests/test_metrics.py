@@ -11,7 +11,7 @@ T0 = datetime(2026, 10, 1, 12, tzinfo=UTC)
 def test_metrics_report() -> None:
     store = Store("sqlite://")
     store.add_item("t", WorkItem(1, "A", "", "", "Bug", (), "u"), "agent/1-a")
-    it = store.get(1)
+    it = store.get_by_ref("t", 1)
     at = lambda stage: replace(it, stage=stage)  # noqa: E731
     store.add_event("intake", {"branch": "agent/1-a"}, item=it, ts=T0)
     store.add_event("agent_session", {"role": "planner", "input_tokens": 1000,

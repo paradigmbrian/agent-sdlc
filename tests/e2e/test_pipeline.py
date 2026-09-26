@@ -52,7 +52,7 @@ class Env:
 
     @property
     def item(self):  # type: ignore[no-untyped-def]
-        return self.store.get(5)
+        return self.store.get_by_ref("fixture", 5)
 
 
 @pytest.fixture
@@ -157,12 +157,12 @@ async def test_escalated_agent_parks_with_trace(
     await env.ticks(3)  # triage, plan, implement
     assert env.item.stage is Stage.PARKED and env.item.park_reason is ParkReason.POLICY
     assert any("Blocked tool calls" in c and ".ssh/config" in c for _, c in env.forge.wi_comments)
-    kinds = [e.kind for e in env.store.events_for(5)]
+    kinds = [e.kind for e in env.store.events_for(env.item.id)]
     assert "tool_denied" in kinds and kinds[-1] == "park_tagged"
-    out = render_trace(env.store, 5)
+    out = render_trace(env.store, env.item.id)
     assert "ESCALATED outside_worktree" in out and "→ parked (policy)" in out
     assert env.runner.traces[1] is not None and env.runner.traces[1].parent == (
-        tmp_path / "traces" / "5")
+        tmp_path / "traces" / "fixture" / "5")
 
 
 async def test_manifest_change_needs_approval_then_reinstalls(
@@ -188,7 +188,7 @@ async def test_manifest_change_needs_approval_then_reinstalls(
     env.forge.set_label(5, "agent:parked", False)
     await env.ticks(1)  # requeue -> verify runs in the same tick
     assert env.item.stage is Stage.REVIEW
-    installs = [e for e in env.store.events_for(5)
+    installs = [e for e in env.store.events_for(env.item.id)
                 if e.kind == "check" and e.payload["name"] == "install"]
     assert len(installs) == 2  # before implement, and after the approved manifest change
     await env.ticks(2)  # review, pr_open
@@ -203,7 +203,7 @@ async def test_abandoned_pr_records_outcome_for_labeling(env: Env) -> None:
     env.forge.prs[100]["status"] = "abandoned"
     await env.ticks(1)
     assert env.item.stage is Stage.CLOSED
-    assert [e.payload["result"] for e in env.store.events_for(5) if e.kind == "outcome"] == [
-        "abandoned"]
-    assert env.store.abandoned_item_ids() == {5}
+    assert [e.payload["result"] for e in env.store.events_for(env.item.id)
+            if e.kind == "outcome"] == ["abandoned"]
+    assert env.store.abandoned_item_ids() == {env.item.id}
     assert label_logged(env.store, "review", 10, lambda _: "true", abandoned_only=True) == 1

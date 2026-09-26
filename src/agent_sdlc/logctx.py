@@ -10,16 +10,16 @@ from pathlib import Path
 
 from agent_sdlc.fsutil import ensure_private_dir
 
-FORMAT = "%(asctime)s %(levelname)s [#%(item)s %(stage)s] %(name)s: %(message)s"
+FORMAT = "%(asctime)s %(levelname)s [%(item)s %(stage)s] %(name)s: %(message)s"
 _item: ContextVar[str] = ContextVar("agent_sdlc_item", default="-")
 _stage: ContextVar[str] = ContextVar("agent_sdlc_stage", default="-")
 _NOISY = ("httpx", "httpcore", "urllib3", "asyncio")
 
 
 @contextmanager
-def log_context(item_id: int, stage: str) -> Iterator[None]:
-    """Tag every log record emitted inside the block with the item and stage."""
-    t_item, t_stage = _item.set(str(item_id)), _stage.set(stage)
+def log_context(item: str, stage: str) -> Iterator[None]:
+    """Tag every log record emitted inside the block with `<target>#<id>` and the stage."""
+    t_item, t_stage = _item.set(item), _stage.set(stage)
     try:
         yield
     finally:

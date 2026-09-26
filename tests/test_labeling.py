@@ -55,7 +55,8 @@ def test_label_logged_marks_decisions() -> None:
     from tests.fakes import decision
     store = Store("sqlite://")
     store.add_item("t", WorkItem(1, "t", "d", "a", "Bug", (), "u"), "b")
-    store.commit_step(store.get(1), [(decision("review", "review_blocking", "no"), {"n": "x"})],
+    store.commit_step(store.get_by_ref("t", 1),
+                      [(decision("review", "review_blocking", "no"), {"n": "x"})],
                       Usage(), date(2026, 9, 23), [])
     assert label_logged(store, "review", 10, lambda _p: "true") == 1
     assert store.labels("review", "review_blocking")[0][1] == "true"
@@ -70,16 +71,16 @@ def test_label_abandoned_only_shows_abandoned_items(capsys: pytest.CaptureFixtur
     store = Store("sqlite://")
     for i in (1, 2):
         store.add_item("t", WorkItem(i, f"W{i}", "", "", "Bug", (), "u"), f"b{i}")
-        store.commit_step(store.get(i), [(decision("review", "review_blocking", "no"),
-                                          {"review_notes": f"notes {i}"})],
+        store.commit_step(store.get_by_ref("t", i), [(decision("review", "review_blocking", "no"),
+                                                       {"review_notes": f"notes {i}"})],
                           Usage(), date(2026, 10, 1), [])
-    store.commit_step(store.get(1), [(decision("comment", "comment_intent", "question"),
-                                      {"comment": "this is obsolete, closing"})],
+    store.commit_step(store.get_by_ref("t", 1), [(decision("comment", "comment_intent", "question"),
+                                                   {"comment": "this is obsolete, closing"})],
                       Usage(), date(2026, 10, 1), [])
-    store.add_event("outcome", {"result": "abandoned"}, item=store.get(1))
+    store.add_event("outcome", {"result": "abandoned"}, item=store.get_by_ref("t", 1))
     n = label_logged(store, "review", 10, lambda _: "true", abandoned_only=True)
     out = capsys.readouterr().out
     assert n == 1
-    assert "item #1 (PR abandoned)" in out and "this is obsolete" in out
+    assert "t#1 (PR abandoned)" in out and "this is obsolete" in out
     assert "notes 1" in out and "notes 2" not in out
     assert [g for _, g in store.labels("review", "review_blocking")] == ["true"]
