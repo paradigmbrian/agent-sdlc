@@ -263,3 +263,77 @@ def test_requeue_local_by_ref(two: Path, db: str) -> None:
                        parked_from=Stage.VERIFY))
     assert run_cfg(two, db, "requeue", "tri#7", "--local") == 0
     assert Store(db).get_by_ref("tri", 7).stage is Stage.VERIFY
+
+
+# --- M-1: unknown --target-name errors instead of silently misbehaving ----------------------
+
+
+def test_m1_pause_unknown_target_name_errors(
+    two: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(two, db, "pause", "--target-name", "bogus") == 1
+    assert "unknown target bogus (known: rally, tri)" in capsys.readouterr().out
+    assert Store(db).get_flag("paused:bogus") is None
+
+
+def test_m1_resume_unknown_target_name_errors(
+    two: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(two, db, "resume", "--target-name", "bogus") == 1
+    assert "unknown target bogus (known: rally, tri)" in capsys.readouterr().out
+
+
+def test_m1_status_unknown_target_name_errors(
+    two: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(two, db, "status", "--target-name", "bogus") == 1
+    assert "unknown target bogus (known: rally, tri)" in capsys.readouterr().out
+
+
+def test_m1_metrics_unknown_target_name_errors(
+    two: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(two, db, "metrics", "--target-name", "bogus") == 1
+    assert "unknown target bogus (known: rally, tri)" in capsys.readouterr().out
+
+
+def test_m1_label_unknown_target_name_errors(
+    two: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(two, db, "label", "triage", "--target-name", "bogus") == 1
+    assert "unknown target bogus (known: rally, tri)" in capsys.readouterr().out
+
+
+# --- M-2: global pause/resume must work even when a target file fails to load ---------------
+
+
+@pytest.fixture
+def one_bad_target(tmp_path: Path) -> Path:
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "a.yaml").write_text(TARGET_YAML.format(
+        name="rally", forge="{kind: ado, org: o, project: p, repo: r}"))
+    (tmp_path / "t" / "bad.yaml").write_text("name: broken\n")  # missing forge/repo/policy
+    cfg = tmp_path / "agent-sdlc.yaml"
+    cfg.write_text("targets: [t/a.yaml, t/bad.yaml]\n")
+    return cfg
+
+
+def test_m2_global_pause_works_when_a_target_file_is_invalid(one_bad_target: Path,
+                                                              db: str) -> None:
+    assert run_cfg(one_bad_target, db, "pause") == 0
+    assert Store(db).get_flag("paused") == "1"
+
+
+def test_m2_global_resume_works_when_a_target_file_is_invalid(one_bad_target: Path,
+                                                               db: str) -> None:
+    assert run_cfg(one_bad_target, db, "resume") == 0
+    assert Store(db).get_flag("paused") is None
+
+
+def test_m2_pause_with_target_name_and_invalid_config_warns_but_still_sets_flag(
+    one_bad_target: Path, db: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert run_cfg(one_bad_target, db, "pause", "--target-name", "rally") == 0
+    out = capsys.readouterr().out
+    assert "warning" in out.lower()
+    assert Store(db).get_flag("paused:rally") == "1"

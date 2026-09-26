@@ -186,22 +186,56 @@ def _status(loaded: Loaded, store: Store, name: str | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     configure_logging(Path(args.logs))
-    loaded = _load(args)
+    loaded: Loaded | None
+    try:
+        loaded = _load(args)
+        load_error: Exception | None = None
+    except Exception as e:  # noqa: BLE001 - the kill switch must work even with a bad
+        # target file (M-2): a config load failure must not block global pause/resume.
+        loaded, load_error = None, e
     store = _store(args.db)
-    names = [t.name for t in loaded.targets]
+    names = [t.name for t in loaded.targets] if loaded is not None else []
+
+    def unknown_target(name: str | None) -> bool:
+        """True (after printing the error) when `name` isn't one of the configured targets."""
+        if name and name not in names:
+            print(f"unknown target {name} (known: {', '.join(names)})")
+            return True
+        return False
 
     if args.cmd == "pause":
+        if loaded is not None:
+            if unknown_target(args.target_name):
+                return 1
+        elif args.target_name:
+            print(f"warning: target config did not load ({load_error}); "
+                  f"pausing {args.target_name} anyway")
         key = f"paused:{args.target_name}" if args.target_name else "paused"
         store.set_flag(key, "1")
         store.add_event("pause", {"target": args.target_name} if args.target_name else None)
-    elif args.cmd == "resume":
+        return 0
+    if args.cmd == "resume":
+        if loaded is not None:
+            if unknown_target(args.target_name):
+                return 1
+        elif args.target_name:
+            print(f"warning: target config did not load ({load_error}); "
+                  f"resuming {args.target_name} anyway")
         if args.target_name:
             store.set_flag(f"paused:{args.target_name}", None)
         else:
             store.set_flag("paused", None)
             store.set_flag("paused_until", None)
         store.add_event("resume", {"target": args.target_name} if args.target_name else None)
-    elif args.cmd == "status":
+        return 0
+
+    if loaded is None:
+        print(f"error loading targets: {load_error}")
+        return 1
+
+    if args.cmd == "status":
+        if unknown_target(args.target_name):
+            return 1
         _status(loaded, store, args.target_name)
     elif args.cmd in ("trace", "requeue"):
         try:
@@ -229,6 +263,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{gate}.{q}: n={r.n} T={r.temperature:.3f} ECE={r.ece:.3f} "
                       f"acc={r.accuracy:.3f} mode={r.mode} — {r.message}")
     elif args.cmd == "label":
+        if unknown_target(args.target_name):
+            return 1
         if args.gate == "triage" and not args.abandoned:
             if not args.target_name and len(names) > 1:
                 print(f"choose a target with --target-name ({', '.join(names)})")
@@ -241,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
             n = label_logged(store, args.gate, args.limit, input, abandoned_only=args.abandoned)
         print(f"recorded {n} labels")
     elif args.cmd == "metrics":
+        if unknown_target(args.target_name):
+            return 1
         now = datetime.now(UTC)
         for target in _selected(loaded, args.target_name):
             print(render_metrics(store, target.name, now - timedelta(days=args.days), now))
