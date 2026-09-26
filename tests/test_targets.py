@@ -5,36 +5,48 @@ import pytest
 from pydantic import ValidationError
 
 from agent_sdlc.policy import PathPolicy
-from agent_sdlc.targets import PolicyConfig, RunWindow, TargetConfig, load_target
+from agent_sdlc.targets import (
+    AdoForgeConfig,
+    GitHubForgeConfig,
+    PolicyConfig,
+    RunWindow,
+    TargetConfig,
+    load_target,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
 MINIMAL = {
     "name": "t",
-    "ado": {"org": "o", "project": "p", "repo": "r"},
+    "forge": {"kind": "ado", "org": "o", "project": "p", "repo": "r"},
     "repo": {"install": "true", "commands": {"test": "true"}},
     "policy": {"protected_paths": ["infra/**"]},
 }
+GITHUB = {**MINIMAL, "forge": {"kind": "github", "owner": "paradigmbrian",
+                                "repo": "triathlon-agent", "app_id": 42}}
 
 
 def test_loads_pilot_target() -> None:
     cfg = load_target(ROOT / "targets" / "rallysource.yaml")
-    assert cfg.ado.org == "MilesThurman"
-    assert cfg.ado.base_branch == "dev"
-    assert cfg.ado.branch_prefix == "agent/"
+    assert isinstance(cfg.forge, AdoForgeConfig)
+    assert cfg.forge.org == "MilesThurman"
+    assert cfg.repo.base_branch == "dev"
+    assert cfg.repo.branch_prefix == "agent/"
+    assert cfg.repo.install == ["npm ci"]
+    assert cfg.intake.label == "agent" and cfg.intake.parked_label == "agent:parked"
     assert cfg.clone_url == "https://dev.azure.com/MilesThurman/CodvoMigration/_git/RallySource"
     assert list(cfg.repo.commands) == ["test", "lint", "typecheck", "build"]
     assert "**/prisma/migrations/**" in cfg.policy.protected_paths
     assert cfg.limits.max_concurrent_items == 1
-    assert cfg.auth.mode == "subscription"
 
 
 def test_defaults_applied() -> None:
     cfg = TargetConfig.model_validate(MINIMAL)
     assert cfg.limits.max_verify_retries == 3
     assert cfg.limits.max_turns == {"plan": 30, "implement": 80, "review": 30}
-    assert cfg.laya.default_threshold == 0.8
-    assert cfg.ado.parked_tag == "agent:parked"
+    assert cfg.intake.parked_label == "agent:parked"
+    assert cfg.repo.base_branch == "main" and cfg.repo.branch_prefix == "agent/"
+    assert cfg.repo.install == ["true"]
 
 
 def test_clone_url_override() -> None:
@@ -43,14 +55,56 @@ def test_clone_url_override() -> None:
     assert cfg.clone_url == "/tmp/x.git"
 
 
+def test_github_forge_derives_clone_url() -> None:
+    cfg = TargetConfig.model_validate(GITHUB)
+    assert isinstance(cfg.forge, GitHubForgeConfig)
+    assert cfg.clone_url == "https://github.com/paradigmbrian/triathlon-agent.git"
+    assert cfg.forge.installation_id is None
+    assert cfg.forge.api_url == "https://api.github.com"
+
+
+def test_github_app_id_may_be_null_but_not_zero() -> None:
+    forge = {k: v for k, v in GITHUB["forge"].items() if k != "app_id"}
+    assert TargetConfig.model_validate({**GITHUB, "forge": forge}).forge.app_id is None
+    with pytest.raises(ValidationError):
+        TargetConfig.model_validate({**GITHUB, "forge": {**forge, "app_id": 0}})
+
+
+def test_rejects_unknown_forge_kind() -> None:
+    with pytest.raises(ValidationError):
+        TargetConfig.model_validate({**MINIMAL, "forge": {"kind": "gitlab", "repo": "r"}})
+
+
+@pytest.mark.parametrize("extra,key", [
+    ({"auth": {"mode": "subscription"}}, "auth"),
+    ({"laya": {"model": "auto"}}, "laya"),
+    ({"limits": {"max_daily_tokens": 5}}, "limits.max_daily_tokens"),
+    ({"limits": {"max_daily_agent_turns": 5}}, "limits.max_daily_agent_turns"),
+    ({"limits": {"run_window": None}}, "limits.run_window"),
+])
+def test_rejects_global_keys_in_target_file(extra: dict[str, object], key: str) -> None:
+    with pytest.raises(ValidationError, match=f"{key}.*agent-sdlc.yaml"):
+        TargetConfig.model_validate({**MINIMAL, **extra})
+
+
+def test_rejects_old_ado_block() -> None:
+    old = {k: v for k, v in MINIMAL.items() if k != "forge"}
+    with pytest.raises(ValidationError, match="'ado' was replaced by 'forge'"):
+        TargetConfig.model_validate({**old, "ado": {"org": "o", "project": "p", "repo": "r"}})
+
+
+def test_install_list_and_empty_install() -> None:
+    repo = {**MINIMAL["repo"], "install": ["uv sync", "npm ci --prefix web"]}
+    cfg = TargetConfig.model_validate({**MINIMAL, "repo": repo})
+    assert cfg.repo.install == ["uv sync", "npm ci --prefix web"]
+    for bad in ([], [" "]):
+        with pytest.raises(ValidationError):
+            TargetConfig.model_validate({**MINIMAL, "repo": {**repo, "install": bad}})
+
+
 def test_rejects_empty_commands() -> None:
     with pytest.raises(ValidationError):
         TargetConfig.model_validate({**MINIMAL, "repo": {"install": "true", "commands": {}}})
-
-
-def test_rejects_unknown_auth_mode() -> None:
-    with pytest.raises(ValidationError):
-        TargetConfig.model_validate({**MINIMAL, "auth": {"mode": "password"}})
 
 
 def test_run_window_same_day_and_wrapping() -> None:

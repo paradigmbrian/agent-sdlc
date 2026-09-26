@@ -46,8 +46,9 @@ def target(origin_repo: Path) -> TargetConfig:
     return TargetConfig.model_validate(
         {
             "name": "fixture",
-            "ado": {"org": "o", "project": "p", "repo": "r"},
+            "forge": {"kind": "ado", "org": "o", "project": "p", "repo": "r"},
             "repo": {
+                "base_branch": "dev",
                 "clone_url": str(origin_repo),
                 "install": "true",
                 "commands": {"test": "sh check.sh"},

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from agent_sdlc.config import GlobalConfig, load_config
 from agent_sdlc.decisions.gates import GATES
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
 from agent_sdlc.logctx import configure_logging
@@ -26,6 +27,8 @@ _ROOT = Path(__file__).resolve().parents[2]
 
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="agent-sdlc")
+    p.add_argument("--config", default=os.environ.get(
+        "AGENT_SDLC_CONFIG", str(_ROOT / "agent-sdlc.yaml")))
     p.add_argument("--target", default=os.environ.get(
         "AGENT_SDLC_TARGET", str(_ROOT / "targets" / "rallysource.yaml")))
     p.add_argument("--db", default=os.environ.get("AGENT_SDLC_DB", _DEFAULT_DB))
@@ -66,8 +69,13 @@ def _store(url: str) -> Store:
     return Store(url)
 
 
-def _runtime(target: TargetConfig, store: Store, workspaces: Path, dry_run_push: bool,
-             traces: Path | None = None) -> tuple[Any, Any, Any]:
+def _global_config(path: str) -> GlobalConfig:
+    p = Path(path)
+    return load_config(p).config if p.exists() else GlobalConfig()
+
+
+def _runtime(cfg: GlobalConfig, target: TargetConfig, store: Store, workspaces: Path,
+             dry_run_push: bool, traces: Path | None = None) -> tuple[Any, Any, Any]:
     from agent_sdlc.adapters.ado import AdoClient
     from agent_sdlc.agents.runner import ClaudeAgentRunner
     from agent_sdlc.decisions.decider import Decider, LayaPredictor
@@ -81,26 +89,30 @@ def _runtime(target: TargetConfig, store: Store, workspaces: Path, dry_run_push:
         basic_auth_header,
         get_secret,
     )
+    from agent_sdlc.targets import AdoForgeConfig
     from agent_sdlc.workspaces import Workspaces
 
     pat = get_secret(*ADO_PAT)
-    if target.auth.mode == "subscription":
+    if cfg.auth.mode == "subscription":
         auth_env = {"CLAUDE_CODE_OAUTH_TOKEN": get_secret(*CLAUDE_TOKEN)}
     else:
         auth_env = {"ANTHROPIC_API_KEY": get_secret(*ANTHROPIC_KEY)}
-    ado = AdoClient(target.ado, pat, dry_run_push=dry_run_push)
+    assert isinstance(target.forge, AdoForgeConfig)
+    ado = AdoClient(target.forge, pat, intake=target.intake, base_branch=target.repo.base_branch,
+                    branch_prefix=target.repo.branch_prefix, dry_run_push=dry_run_push)
     ws = Workspaces(workspaces.resolve(), target, git_auth_header=basic_auth_header(pat))
     pp = PathPolicy(target.policy.protected_paths)
-    cp = CommandPolicy([target.repo.install, *target.repo.commands.values()])
+    cp = CommandPolicy([*target.repo.install, *target.repo.commands.values()])
     runner = ClaudeAgentRunner(pp, cp, Path("~/.agent-sdlc/claude-config").expanduser(), auth_env,
                                should_stop=lambda: store.get_flag("paused") == "1", home=ws.home,
                                max_denials=target.limits.max_denials_per_session)
-    decider = Decider(LayaPredictor(target.laya.model), store.calibration,
-                      target.laya.default_threshold)
+    decider = Decider(LayaPredictor(cfg.laya.model), store.calibration,
+                      cfg.laya.default_threshold)
     executor = StageExecutor(target=target, ado=ado, decider=decider, runner=runner,
                              workspaces=ws, path_policy=pp, decisions_for=store.decisions_for,
                              traces=traces)
-    scheduler = Scheduler(target=target, store=store, executor=executor, ado=ado, workspaces=ws)
+    scheduler = Scheduler(target=target, store=store, executor=executor, ado=ado, workspaces=ws,
+                          limits=cfg.limits)
     return scheduler, ado, decider
 
 
@@ -168,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     configure_logging(Path(args.logs))
     target = load_target(Path(args.target))
+    cfg = _global_config(args.config)
     store = _store(args.db)
     traces = Path(args.traces)
 
@@ -194,18 +207,18 @@ def main(argv: list[str] | None = None) -> int:
                 "from_reason": item.park_reason.value if item.park_reason else None,
                 "to": new.stage.value, "approved": False, "local": True})], at=item)
         else:
-            scheduler, *_ = _runtime(target, store, Path(args.workspaces), False, traces)
+            scheduler, *_ = _runtime(cfg, target, store, Path(args.workspaces), False, traces)
             scheduler.requeue_item(args.item_id)
     elif args.cmd == "calibrate":
         gates = [args.gate] if args.gate else sorted(GATES)
         for gate in gates:
             for q in GATES[gate]:
-                r = calibrate_question(store, gate, q, target.laya.max_ece, args.promote)
+                r = calibrate_question(store, gate, q, cfg.laya.max_ece, args.promote)
                 print(f"{gate}.{q}: n={r.n} T={r.temperature:.3f} ECE={r.ece:.3f} "
                       f"acc={r.accuracy:.3f} mode={r.mode} — {r.message}")
     elif args.cmd == "label":
         if args.gate == "triage" and not args.abandoned:
-            _, ado, decider = _runtime(target, store, Path(args.workspaces), True, traces)
+            _, ado, decider = _runtime(cfg, target, store, Path(args.workspaces), True, traces)
             n = label_triage(ado, decider, store, args.limit, input)
         else:
             n = label_logged(store, args.gate, args.limit, input, abandoned_only=args.abandoned)
@@ -215,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         print(render_metrics(store, target.name, now - timedelta(days=args.days), now))
     elif args.cmd == "run":
         store.set_flag("poll_s", str(args.poll))
-        scheduler, *_ = _runtime(target, store, Path(args.workspaces), args.dry_run_push,
+        scheduler, *_ = _runtime(cfg, target, store, Path(args.workspaces), args.dry_run_push,
                                  traces)
         if args.once:
             asyncio.run(scheduler.tick())

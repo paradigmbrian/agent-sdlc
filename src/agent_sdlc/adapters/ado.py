@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from agent_sdlc.secrets import basic_auth_header
-from agent_sdlc.targets import AdoConfig
+from agent_sdlc.targets import AdoForgeConfig, IntakeConfig
 from agent_sdlc.types import PrComment, WorkItem
 from agent_sdlc.workspaces import git_env
 
@@ -49,13 +49,18 @@ def html_to_text(value: str) -> str:
 
 
 class AdoClient:
-    def __init__(self, cfg: AdoConfig, pat: str, *, http: httpx.Client | None = None,
-                 push_url: str | None = None, dry_run_push: bool = False) -> None:
+    def __init__(self, cfg: AdoForgeConfig, pat: str, *, intake: IntakeConfig | None = None,
+                 base_branch: str = "dev", branch_prefix: str = "agent/",
+                 http: httpx.Client | None = None, push_url: str | None = None,
+                 dry_run_push: bool = False) -> None:
         self._cfg = cfg
+        self._intake = intake or IntakeConfig()
+        self._base_branch = base_branch
+        self._branch_prefix = branch_prefix
         self._http = http or httpx.Client(base_url=f"https://dev.azure.com/{cfg.org}",
                                           auth=("", pat), timeout=30)
         self._auth_header = basic_auth_header(pat)
-        self._push_url = push_url or cfg.repo_https_url
+        self._push_url = push_url or cfg.clone_url
         self._dry_run = dry_run_push
         self._self_id: str | None = None
 
@@ -76,8 +81,8 @@ class AdoClient:
         return f"{self._p}/git/repositories/{self._cfg.repo}"
 
     def _check_branch(self, branch: str) -> None:
-        if not branch.startswith(self._cfg.branch_prefix):
-            raise AdoError(f"refusing ref outside {self._cfg.branch_prefix}*: {branch}")
+        if not branch.startswith(self._branch_prefix):
+            raise AdoError(f"refusing ref outside {self._branch_prefix}*: {branch}")
 
     # work items ------------------------------------------------------------
     def _wiql_ids(self, where: str, order: str) -> list[int]:
@@ -88,7 +93,7 @@ class AdoClient:
 
     def list_intake(self) -> list[WorkItem]:
         ids = self._wiql_ids(
-            f"[System.Tags] CONTAINS '{self._cfg.intake_tag}' "
+            f"[System.Tags] CONTAINS '{self._intake.label}' "
             "AND [System.State] NOT IN ('Closed', 'Removed', 'Done')",
             "[System.CreatedDate] ASC")
         return self.get_work_items(ids)
@@ -160,7 +165,7 @@ class AdoClient:
             return 0
         res = self._req("POST", f"{self._repo}/pullrequests", json={
             "sourceRefName": f"refs/heads/{branch}",
-            "targetRefName": f"refs/heads/{self._cfg.base_branch}",
+            "targetRefName": f"refs/heads/{self._base_branch}",
             "title": title, "description": body,
             "workItemRefs": [{"id": str(work_item_id)}],
         })

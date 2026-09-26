@@ -175,3 +175,16 @@ def test_diff_stat_for_paths(ws: Workspaces) -> None:
     ws.commit(wt, "ab")
     d = ws.diff(wt, paths=["a.txt"], stat=True)
     assert "a.txt" in d and "1 file changed" in d and "b.txt" not in d
+
+
+def test_install_runs_each_command_and_stops_at_first_failure(
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    multi = target.model_copy(update={"repo": target.repo.model_copy(
+        update={"install": ["echo one", "sh -c 'exit 3'", "echo never"]})})
+    ws = Workspaces(tmp_path / "w", multi)
+    wt = ws.create(1, "agent/1-a")
+    r = ws.install(wt, log=tmp_path / "install.log")
+    assert r.exit_code == 3 and "one" in r.output and "never" not in r.output
+    assert r.command == "echo one ; sh -c 'exit 3' ; echo never"
+    assert "$ echo one" in (tmp_path / "install.log").read_text()

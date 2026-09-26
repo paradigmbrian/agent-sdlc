@@ -147,7 +147,7 @@ class Workspaces:
             "-B",
             branch,
             str(path),
-            f"origin/{self._t.ado.base_branch}",
+            f"origin/{self._t.repo.base_branch}",
             cwd=self._base,
         )
         return path
@@ -181,7 +181,21 @@ class Workspaces:
         )
 
     def install(self, wt: Path, log: Path | None = None) -> CommandResult:
-        return self.run("install", self._t.repo.install, wt, log)
+        """Run each install command in order, stopping at the first failure (spec §2.2)."""
+        start = time.monotonic()
+        parts: list[str] = []
+        code = 0
+        for cmd in self._t.repo.install:
+            r = self.run("install", cmd, wt)
+            parts.append(f"$ {cmd}\n{r.output}")
+            code = r.exit_code
+            if not r.ok:
+                break
+        command = " ; ".join(self._t.repo.install)
+        out = "\n".join(parts)
+        written = _write_log(log, command, out, code) if log is not None else None
+        return CommandResult("install", command, code, out[-_OUTPUT_TAIL:],
+                             round(time.monotonic() - start, 2), written)
 
     def run_checks(self, wt: Path,
                    log_for: Callable[[str], Path | None] | None = None) -> list[CommandResult]:
@@ -201,7 +215,7 @@ class Workspaces:
         return True
 
     def _range(self) -> str:
-        return f"origin/{self._t.ado.base_branch}...HEAD"
+        return f"origin/{self._t.repo.base_branch}...HEAD"
 
     def changed_files(self, wt: Path) -> list[str]:
         out = self._git("diff", "--name-only", self._range(), cwd=wt)

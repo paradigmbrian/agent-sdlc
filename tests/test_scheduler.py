@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agent_sdlc.config import GlobalLimits
 from agent_sdlc.orchestrator.scheduler import Scheduler
 from agent_sdlc.orchestrator.stages import StageExecutor, StepResult
 from agent_sdlc.orchestrator.transitions import Transition, park
@@ -168,14 +169,13 @@ async def test_item_budget_parks(env) -> None:  # type: ignore[no-untyped-def]
 
 async def test_run_window_blocks_agent_stages_not_polling(env) -> None:  # type: ignore[no-untyped-def]
     store, ado, ws, target = env
-    night = target.model_copy(update={"limits": target.limits.model_copy(
-        update={"run_window": RunWindow(start=time(19), end=time(7))})})
     store.add_item("fixture", WI, "agent/5-add-feature")
     store.save(replace(store.get(5), stage=Stage.AWAITING_HUMAN, pr_id=1))
     store.add_item("fixture", replace(WI, id=6), "agent/6-x")
     ex = ScriptedExecutor(StepResult(Transition(Stage.AWAITING_HUMAN)))
-    await Scheduler(target=night, store=store, executor=ex, ado=ado, workspaces=ws,
-                    clock=lambda: NOW).tick()
+    await Scheduler(target=target, store=store, executor=ex, ado=ado, workspaces=ws,
+                    clock=lambda: NOW,
+                    limits=GlobalLimits(run_window=RunWindow(start=time(19), end=time(7)))).tick()
     assert [i.id for i in ex.seen] == [5]
 
 

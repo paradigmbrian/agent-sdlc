@@ -7,14 +7,14 @@ import respx
 
 from agent_sdlc.adapters.ado import API, AdoClient, AdoError, html_to_text
 from agent_sdlc.secrets import SecretNotFound, basic_auth_header, get_secret
-from agent_sdlc.targets import AdoConfig, TargetConfig
+from agent_sdlc.targets import AdoForgeConfig, TargetConfig
 from agent_sdlc.workspaces import Workspaces
 from tests.conftest import git
 
 BASE = "https://dev.azure.com/MilesThurman"
 PROJ = f"{BASE}/CodvoMigration/_apis"
 REPO = f"{PROJ}/git/repositories/RallySource"
-CFG = AdoConfig(org="MilesThurman", project="CodvoMigration", repo="RallySource")
+CFG = AdoForgeConfig(kind="ado", org="MilesThurman", project="CodvoMigration", repo="RallySource")
 SELF_ID = "self-guid"
 
 

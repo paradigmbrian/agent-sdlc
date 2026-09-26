@@ -1,14 +1,16 @@
 name: rallysource
-ado:
+forge:
+  kind: ado
   org: MilesThurman
   project: CodvoMigration
   repo: RallySource
-  intake_tag: agent
-  parked_tag: "agent:parked"
+intake:
+  label: agent
+  parked_label: "agent:parked"
+repo:
   base_branch: dev
   branch_prefix: agent/
-repo:
-  install: npm ci
+  install: [npm ci]
   commands:
     test: npm run test --workspace=apps/rallysource-api
     lint: npm run lint
@@ -58,14 +60,5 @@ limits:
   max_pr_rounds: 3
   max_turns: {plan: 30, implement: 80, review: 30}
   max_item_tokens: 2000000
-  max_daily_agent_turns: 400
-  max_daily_tokens: 20000000
-  run_window: null
   max_denials_per_session: 5
   stale_after_minutes: 120
-auth:
-  mode: subscription
-laya:
-  model: auto
-  max_ece: 0.10
-  default_threshold: 0.8

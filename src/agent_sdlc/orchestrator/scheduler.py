@@ -10,6 +10,7 @@ from typing import Protocol
 import httpx
 
 from agent_sdlc.adapters.ado import AdoError
+from agent_sdlc.config import GlobalLimits
 from agent_sdlc.logctx import log_context
 from agent_sdlc.orchestrator.events import agent_events, transition_event
 from agent_sdlc.orchestrator.reporting import park_comment_html
@@ -66,13 +67,15 @@ def in_flight(items: list[Item], limit: int) -> list[Item]:
 
 class Scheduler:
     def __init__(self, *, target: TargetConfig, store: Store, executor: Executor, ado: AdoPort,
-                 workspaces: WorkspacePort, clock: Callable[[], datetime] | None = None) -> None:
+                 workspaces: WorkspacePort, clock: Callable[[], datetime] | None = None,
+                 limits: GlobalLimits | None = None) -> None:
         self._t = target
         self._store = store
         self._executor = executor
         self._ado = ado
         self._ws = workspaces
         self._clock = clock or (lambda: datetime.now().astimezone())
+        self._limits = limits or GlobalLimits()
 
     # loop ------------------------------------------------------------------
     async def run_forever(self, poll_s: int = 60) -> None:
@@ -90,7 +93,7 @@ class Scheduler:
         return bool(until and datetime.fromisoformat(until) > now)
 
     def _agent_work_allowed(self, now: datetime) -> bool:
-        lim = self._t.limits
+        lim = self._limits
         if lim.run_window and not lim.run_window.contains(now.time()):
             return False
         used = self._store.daily_usage(now.date())
@@ -133,9 +136,9 @@ class Scheduler:
             log.warning("intake failed; skipping this tick: %s", e)
             return
         for wi in intake:
-            if self._t.ado.parked_tag in wi.tags:
+            if self._t.intake.parked_label in wi.tags:
                 continue
-            branch = f"{self._t.ado.branch_prefix}{wi.id}-{slugify(wi.title)}"
+            branch = f"{self._t.repo.branch_prefix}{wi.id}-{slugify(wi.title)}"
             if self._store.add_item(self._t.name, wi, branch):
                 self._store.add_event("intake", {"title": wi.title, "branch": branch},
                                       item=self._store.get(wi.id))
@@ -149,7 +152,7 @@ class Scheduler:
                 self._park_side_effects(item)
                 continue
             try:
-                tagged = self._ado.has_tag(item.id, self._t.ado.parked_tag)
+                tagged = self._ado.has_tag(item.id, self._t.intake.parked_label)
             except _INFRA_ERRORS as e:
                 log.warning("has_tag failed for #%s; leaving parked this tick: %s", item.id, e)
                 continue
@@ -179,7 +182,7 @@ class Scheduler:
         self._store.commit_step(new, [], Usage(), self._clock().date(), labels,
                                 events=[event], at=item)
         try:
-            self._ado.set_tag(item.id, self._t.ado.parked_tag, False)
+            self._ado.set_tag(item.id, self._t.intake.parked_label, False)
         except _INFRA_ERRORS as e:
             log.warning("clearing parked tag failed for #%s (idempotent cleanup): %s", item.id, e)
         log.info("requeued #%s -> %s", item.id, new.stage)
@@ -274,7 +277,7 @@ class Scheduler:
         """Tag first, and record that the tag is set, before commenting: only a confirmed tag
         makes its later removal mean "a human approved" (C1)."""
         try:
-            self._ado.set_tag(item.id, self._t.ado.parked_tag, True)
+            self._ado.set_tag(item.id, self._t.intake.parked_label, True)
         except _INFRA_ERRORS as e:
             log.exception("setting the parked tag failed for #%s; will retry", item.id)
             self._store.add_event("park_side_effect_failed",

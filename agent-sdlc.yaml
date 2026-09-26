@@ -1,0 +1,15 @@
+# Settings of the one Claude subscription and the one agent-sdlc process.
+# Per-repo settings live in each target file (spec 2026-09-26 §2).
+targets:
+  - targets/rallysource.yaml
+auth:
+  mode: subscription            # subscription | api_key
+laya:
+  model: auto
+  max_ece: 0.10
+  default_threshold: 0.8
+limits:
+  max_daily_agent_turns: 400
+  max_daily_tokens: 20000000
+  max_concurrent_sessions: 1    # agent sessions across all targets
+  run_window: null              # e.g. {start: "19:00", end: "07:00"}
