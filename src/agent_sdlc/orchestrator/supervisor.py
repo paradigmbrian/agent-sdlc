@@ -31,11 +31,13 @@ class Supervisor:
     def stop(self) -> None:
         self._stop.set()
 
-    def _once(self, t: TargetConfig) -> None:
+    def _once(self, t: TargetConfig) -> bool:
         try:
             asyncio.run(self._build(t).tick())
+            return True
         except Exception:
             log.exception("target %s failed this tick", t.name)
+            return False
 
     def _serve(self, t: TargetConfig, poll_s: int) -> None:
         while not self._stop.is_set():
@@ -54,12 +56,20 @@ class Supervisor:
             self._stop.set()
             raise
 
-    def run_once(self) -> None:
-        threads = [threading.Thread(target=self._once, args=(t,), name=f"target-{t.name}",
+    def run_once(self) -> bool:
+        """True if every target's tick succeeded this round (M-4); a failed target still does
+        not block the others, but the caller (the CLI) must be able to report a bad run."""
+        results: dict[str, bool] = {}
+
+        def run(t: TargetConfig) -> None:
+            results[t.name] = self._once(t)
+
+        threads = [threading.Thread(target=run, args=(t,), name=f"target-{t.name}",
                                     daemon=True) for t in self._targets]
         for th in threads:
             th.start()
         self._join(threads)
+        return all(results.values())
 
     def run_forever(self, poll_s: int) -> None:
         threads = [threading.Thread(target=self._serve, args=(t, poll_s),

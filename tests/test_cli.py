@@ -232,6 +232,29 @@ def test_trace_by_ref_and_ambiguous(two: Path, db: str,
     assert "rally#5, tri#5" in capsys.readouterr().out
 
 
+@pytest.fixture
+def one_broken_target(tmp_path: Path) -> Path:
+    (tmp_path / "t").mkdir()
+    # No app_id: make_forge raises ValueError for this target (spec §7), before any secret
+    # or network access, so run --once fails fast and deterministically.
+    (tmp_path / "t" / "b.yaml").write_text(TARGET_YAML.format(
+        name="tri", forge="{kind: github, owner: o, repo: r}"))
+    cfg = tmp_path / "agent-sdlc.yaml"
+    cfg.write_text("targets: [t/b.yaml]\n")
+    return cfg
+
+
+def test_m4_run_once_exits_nonzero_when_a_target_fails_to_build(
+    one_broken_target: Path, db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agent_sdlc.cli as cli_mod
+    from tests.fakes import FakeDecider
+    # Avoid constructing the real (heavy) Laya-backed decider: irrelevant to this failure,
+    # which happens while building the target's forge, before any decision is made.
+    monkeypatch.setattr(cli_mod, "_decider", lambda cfg, store: FakeDecider())
+    assert run_cfg(one_broken_target, db, "run", "--once") == 1
+
+
 def test_requeue_local_by_ref(two: Path, db: str) -> None:
     store = Store(db)
     it = store.add_item("tri", WorkItem(7, "B", "", "", "Bug", (), "u"), "b")

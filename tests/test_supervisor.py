@@ -31,9 +31,10 @@ class FakeScheduler:
 def test_run_once_ticks_targets_in_parallel_threads() -> None:
     barrier = threading.Barrier(2)
     scheds = {"a": FakeScheduler(barrier), "b": FakeScheduler(barrier)}
-    Supervisor([A, B], lambda t: scheds[t.name]).run_once()  # type: ignore[arg-type,return-value]
+    ok = Supervisor([A, B], lambda t: scheds[t.name]).run_once()  # type: ignore[arg-type,return-value]
     assert scheds["a"].ticks == 1 and scheds["b"].ticks == 1
     assert scheds["a"].threads != scheds["b"].threads
+    assert ok is True
 
 
 def test_run_once_build_failure_does_not_block_other_targets() -> None:
@@ -46,6 +47,42 @@ def test_run_once_build_failure_does_not_block_other_targets() -> None:
 
     Supervisor([A, B], build).run_once()  # type: ignore[arg-type]
     assert ok.ticks == 1
+
+
+def test_m4_run_once_reports_failure_when_a_target_fails_to_build() -> None:
+    ok = FakeScheduler()
+
+    def build(t: TargetConfig) -> FakeScheduler:
+        if t.name == "a":
+            raise ValueError("set forge.app_id for target a")
+        return ok
+
+    assert Supervisor([A, B], build).run_once() is False  # type: ignore[arg-type]
+    assert ok.ticks == 1
+
+
+class FailingTickScheduler:
+    async def tick(self) -> None:
+        raise RuntimeError("boom")
+
+    async def run_forever(self, poll_s: int = 60,
+                          stop: threading.Event | None = None) -> None:
+        raise NotImplementedError
+
+
+def test_m4_run_once_reports_failure_when_a_target_tick_raises() -> None:
+    ok = FakeScheduler()
+
+    def build(t: TargetConfig) -> object:
+        return FailingTickScheduler() if t.name == "a" else ok
+
+    assert Supervisor([A, B], build).run_once() is False  # type: ignore[arg-type]
+    assert ok.ticks == 1
+
+
+def test_m4_run_once_is_true_when_every_target_succeeds() -> None:
+    scheds = {"a": FakeScheduler(), "b": FakeScheduler()}
+    assert Supervisor([A, B], lambda t: scheds[t.name]).run_once() is True  # type: ignore[arg-type,return-value]
 
 
 def test_run_forever_restarts_a_crashed_target() -> None:

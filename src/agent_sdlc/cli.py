@@ -251,9 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         sup = Supervisor(loaded.targets, lambda t: _scheduler(
             loaded, t, store, args, decider, slots, args.dry_run_push))
         if args.once:
-            sup.run_once()
-        else:
-            sup.run_forever(args.poll)
+            return 0 if sup.run_once() else 1
+        sup.run_forever(args.poll)
     return 0
 
 
