@@ -48,3 +48,21 @@ def test_metrics_report() -> None:
 def test_metrics_empty_store() -> None:
     out = render_metrics(Store("sqlite://"), "t", T0, T0)
     assert "merge rate n/a" in out and "tokens per item: n/a" in out
+
+
+def test_i2_metrics_only_counts_the_selected_targets_events() -> None:
+    """Two targets' events in one store; render_metrics("a", ...) must reflect only a's (I2)."""
+    store = Store("sqlite://")
+    store.add_item("a", WorkItem(1, "A", "", "", "Bug", (), "u"), "agent/1-a")
+    store.add_item("b", WorkItem(1, "B", "", "", "Bug", (), "u"), "agent/1-b")
+    a_item = store.get_by_ref("a", 1)
+    b_item = store.get_by_ref("b", 1)
+    store.add_event("intake", {"branch": "agent/1-a"}, item=a_item, ts=T0)
+    store.add_event("outcome", {"result": "merged"}, item=a_item, ts=T0 + timedelta(hours=1))
+    store.add_event("intake", {"branch": "agent/1-b"}, item=b_item, ts=T0)
+    store.add_event("outcome", {"result": "merged"}, item=b_item, ts=T0 + timedelta(hours=1))
+    store.add_event("outcome", {"result": "abandoned"}, item=b_item, ts=T0 + timedelta(hours=2))
+    out_a = render_metrics(store, "a", T0 - timedelta(days=1), T0 + timedelta(days=1))
+    assert "taken in 1 · merged 1 · abandoned 0" in out_a
+    out_b = render_metrics(store, "b", T0 - timedelta(days=1), T0 + timedelta(days=1))
+    assert "taken in 1 · merged 1 · abandoned 1" in out_b

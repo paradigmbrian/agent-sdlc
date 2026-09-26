@@ -37,12 +37,14 @@ def _counts(c: Counter[str]) -> str:
 
 
 def render_metrics(store: Store, target: str, since: datetime, now: datetime) -> str:
-    """Pipeline report over events in [since, now] (spec §6.3)."""
+    """Pipeline report over events in [since, now], scoped to this target (spec §4.3): with
+    several targets sharing one store, another target's events must not be counted here (I2)."""
+    items = store.items(target)
+    item_ids = {i.id for i in items}
     kind: dict[str, list[Event]] = defaultdict(list)
     for e in store.events_since(since):
-        if e.ts <= now:
+        if e.ts <= now and e.item_id in item_ids:
             kind[e.kind].append(e)
-    items = store.items(target)
     transitions = kind["transition"]
     out = [f"agent-sdlc metrics · {target} · {since:%Y-%m-%d} to {now:%Y-%m-%d}"]
 
