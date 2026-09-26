@@ -1,4 +1,5 @@
 import base64
+from pathlib import Path
 from urllib.parse import unquote
 
 import httpx
@@ -7,7 +8,10 @@ import respx
 
 from agent_sdlc.adapters.errors import ForgeError
 from agent_sdlc.adapters.github import GitHubForge, split_acceptance
-from agent_sdlc.targets import GitHubForgeConfig, IntakeConfig
+from agent_sdlc.targets import GitHubForgeConfig, IntakeConfig, TargetConfig
+from agent_sdlc.types import PrComment
+from agent_sdlc.workspaces import Workspaces
+from tests.conftest import git
 
 API = "https://api.github.com"
 REPO = f"{API}/repos/paradigmbrian/triathlon-agent"
@@ -185,3 +189,141 @@ def test_429_uses_retry_after_when_ratelimit_reset_absent() -> None:
     with pytest.raises(ForgeError, match="rate limit.*retry after 60 s") as e:
         f.get_item(5)
     assert "ghs_" not in str(e.value)
+
+
+def user(login: str) -> dict[str, str]:
+    return {"login": login}
+
+
+@respx.mock
+def test_create_and_update_pr_carry_closes_line() -> None:
+    create = respx.post(f"{REPO}/pulls").mock(
+        return_value=httpx.Response(201, json={"number": 12}))
+    update = respx.patch(f"{REPO}/pulls/12").mock(return_value=httpx.Response(200, json={}))
+    f = forge()
+    assert f.create_pr("agent/5-x", "fix: x (#5)", "body", 5) == 12
+    sent = httpx.Response(200, content=create.calls[0].request.content).json()
+    assert sent == {"title": "fix: x (#5)", "head": "agent/5-x", "base": "main",
+                    "body": "body\n\nCloses #5"}
+    f.update_pr(12, "new", 5)
+    assert httpx.Response(200, content=update.calls[0].request.content).json() == {
+        "body": "new\n\nCloses #5"}
+    with pytest.raises(ForgeError):
+        f.create_pr("main", "t", "b", 5)
+
+
+@respx.mock
+def test_pr_status_mapping() -> None:
+    respx.get(f"{REPO}/pulls/1").mock(return_value=httpx.Response(
+        200, json={"state": "closed", "merged": True}))
+    respx.get(f"{REPO}/pulls/2").mock(return_value=httpx.Response(
+        200, json={"state": "closed", "merged": False}))
+    respx.get(f"{REPO}/pulls/3").mock(return_value=httpx.Response(
+        200, json={"state": "open", "merged": False}))
+    f = forge()
+    assert [f.pr_status(n) for n in (1, 2, 3)] == ["completed", "abandoned", "active"]
+
+
+@respx.mock
+def test_pr_comments_merge_three_sources_and_skip_the_bot() -> None:
+    respx.get(f"{REPO}/issues/12/comments").mock(return_value=httpx.Response(200, json=[
+        {"id": 1, "user": user("brian"), "body": "please add docs"},
+        {"id": 2, "user": user("agent-sdlc-bot[bot]"), "body": "my own reply"},
+        {"id": 3, "user": user("brian"), "body": "   "},
+    ]))
+    respx.get(f"{REPO}/pulls/12/comments").mock(return_value=httpx.Response(200, json=[
+        {"id": 10, "user": user("brian"), "body": "rename this", "in_reply_to_id": None},
+        {"id": 11, "user": user("brian"), "body": "and this", "in_reply_to_id": 10},
+    ]))
+    respx.get(f"{REPO}/pulls/12/reviews").mock(return_value=httpx.Response(200, json=[
+        {"id": 20, "user": user("brian"), "body": "", "state": "CHANGES_REQUESTED"},
+        {"id": 21, "user": user("brian"), "body": "", "state": "APPROVED"},
+        {"id": 22, "user": user("brian"), "body": "/agent tidy up", "state": "COMMENTED"},
+        {"id": 23, "user": user("brian"), "body": "draft", "state": "PENDING"},
+    ]))
+    got = forge().pr_comments(12)
+    assert [(c.kind, c.thread_id, c.comment_id, c.content, c.changes_requested) for c in got] == [
+        ("conversation", 0, 1, "please add docs", False),
+        ("review_comment", 10, 10, "rename this", False),
+        ("review_comment", 10, 11, "and this", False),
+        ("review", 0, 20, "(changes requested with no summary)", True),
+        ("review", 0, 22, "/agent tidy up", False),
+    ]
+    assert len({c.key for c in got}) == 5
+
+
+@respx.mock
+def test_pr_comments_read_every_page() -> None:
+    first = [{"id": n, "user": user("brian"), "body": f"c{n}"} for n in range(1, 101)]
+    respx.get(f"{REPO}/issues/12/comments", params={"page": "1"}).mock(
+        return_value=httpx.Response(200, json=first))
+    respx.get(f"{REPO}/issues/12/comments", params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=[{"id": 101, "user": user("b"), "body": "last"}]))
+    respx.get(f"{REPO}/pulls/12/comments").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{REPO}/pulls/12/reviews").mock(return_value=httpx.Response(200, json=[]))
+    assert len(forge().pr_comments(12)) == 101
+
+
+@respx.mock
+def test_reply_routing() -> None:
+    thread = respx.post(f"{REPO}/pulls/12/comments/10/replies").mock(
+        return_value=httpx.Response(201))
+    convo = respx.post(f"{REPO}/issues/12/comments").mock(return_value=httpx.Response(201))
+    f = forge()
+    f.reply_pr(12, PrComment(10, 11, "brian", "why?", kind="review_comment"), "Because.")
+    f.reply_pr(12, PrComment(0, 1, "brian", "line one\nline two", kind="conversation"), "Sure.")
+    assert httpx.Response(200, content=thread.calls[0].request.content).json() == {
+        "body": "Because."}
+    body = httpx.Response(200, content=convo.calls[0].request.content).json()["body"]
+    assert body == "> line one\n> line two\n\n@brian Sure."
+
+
+@respx.mock
+def test_delete_branch_tolerates_missing_and_refuses_other_refs() -> None:
+    route = respx.delete(f"{REPO}/git/refs/heads/agent/5-x").mock(
+        return_value=httpx.Response(422))
+    f = forge()
+    f.delete_branch("agent/5-x")
+    assert route.call_count == 1
+    with pytest.raises(ForgeError):
+        f.delete_branch("main")
+
+
+@respx.mock
+def test_dry_run_makes_pr_side_effects_no_ops() -> None:
+    f = forge(dry_run=True)
+    assert f.create_pr("agent/5-x", "t", "b", 5) == 0
+    f.update_pr(0, "b", 5)
+    f.comment_pr(0, "x")
+    f.reply_pr(0, PrComment(0, 1, "a", "c", kind="conversation"), "x")
+    f.delete_branch("agent/5-x")
+    assert f.pr_status(0) == "active" and f.pr_comments(0) == []
+    assert respx.calls.call_count == 0
+
+
+def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
+                                     origin_repo: Path) -> None:
+    ws = Workspaces(tmp_path / "w", target)
+    wt = ws.create(5, "agent/5-x")
+    (wt / "f.txt").write_text("x")
+    ws.commit(wt, "feat: f")
+    f = forge(push_url=str(origin_repo))
+    f.push_branch(wt, "agent/5-x")
+    assert "agent/5-x" in git("branch", "--list", "agent/*", cwd=origin_repo)
+    with pytest.raises(ForgeError):
+        f.push_branch(wt, "main")
+
+
+def test_push_failure_is_redacted(tmp_path: Path, target: TargetConfig) -> None:
+    ws = Workspaces(tmp_path / "w", target)
+    wt = ws.create(5, "agent/5-x")
+    f = forge(push_url=str(tmp_path / "missing-ghs_one.git"))
+    with pytest.raises(ForgeError) as e:
+        f.push_branch(wt, "agent/5-x")
+    assert "ghs_one" not in str(e.value)
+
+
+def test_github_forge_satisfies_the_port() -> None:
+    from agent_sdlc.ports import ForgePort
+    port: ForgePort = forge()
+    assert port.kind == "github"

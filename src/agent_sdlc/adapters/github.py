@@ -3,15 +3,18 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import subprocess
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import quote
 
 import httpx
 
-from agent_sdlc.adapters.errors import ForgeError
+from agent_sdlc.adapters.errors import ForgeError, redact
 from agent_sdlc.adapters.github_auth import HEADERS
 from agent_sdlc.targets import GitHubForgeConfig, IntakeConfig
-from agent_sdlc.types import WorkItem
+from agent_sdlc.types import PrComment, WorkItem
+from agent_sdlc.workspaces import git_env
 
 log = logging.getLogger(__name__)
 _PER_PAGE = 100
@@ -160,3 +163,95 @@ class GitHubForge:
         else:
             self._req("DELETE", f"{self._repo}/issues/{id}/labels/{quote(label, safe='')}",
                       ok=(404,))
+
+    # git & pull requests ---------------------------------------------------
+    def push_branch(self, worktree: Path, branch: str) -> None:
+        self._check_branch(branch)
+        if self._dry_run:
+            log.info("dry-run: would push %s", branch)
+            return
+        token = self._auth.token()
+        r = subprocess.run(
+            ["git", "-c", f"http.extraheader={self.git_auth_header()}", "push", self._push_url,
+             f"HEAD:refs/heads/{branch}"],
+            cwd=worktree, capture_output=True, text=True, env=git_env())
+        if r.returncode != 0:
+            raise ForgeError(f"push failed: {redact(r.stderr.strip(), [token])}")
+
+    @staticmethod
+    def _closes(body: str, item_id: int) -> str:
+        return f"{body}\n\nCloses #{item_id}"
+
+    def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
+        self._check_branch(branch)
+        if self._dry_run:
+            log.info("dry-run: would open PR %s\n%s", title, body)
+            return 0
+        res = self._req("POST", f"{self._repo}/pulls", json={
+            "title": title, "head": branch, "base": self._base_branch,
+            "body": self._closes(body, item_id)})
+        return int(res["number"])
+
+    def update_pr(self, pr_id: int, body: str, item_id: int) -> None:
+        if self._dry_run:
+            log.info("dry-run: would update PR %s description", pr_id)
+            return
+        self._req("PATCH", f"{self._repo}/pulls/{pr_id}",
+                  json={"body": self._closes(body, item_id)})
+
+    def pr_status(self, pr_id: int) -> str:
+        if self._dry_run:
+            return "active"
+        pr = self._req("GET", f"{self._repo}/pulls/{pr_id}")
+        if pr.get("merged"):
+            return "completed"
+        return "abandoned" if pr.get("state") == "closed" else "active"
+
+    def pr_comments(self, pr_id: int) -> list[PrComment]:
+        if self._dry_run:
+            return []
+        me = self._auth.bot_login()
+        out: list[PrComment] = []
+        for c in self._pages(f"{self._repo}/issues/{pr_id}/comments"):
+            author, body = str(c["user"]["login"]), str(c.get("body") or "")
+            if author != me and body.strip():
+                out.append(PrComment(0, int(c["id"]), author, body, kind="conversation"))
+        for c in self._pages(f"{self._repo}/pulls/{pr_id}/comments"):
+            author, body = str(c["user"]["login"]), str(c.get("body") or "")
+            if author != me and body.strip():
+                out.append(PrComment(int(c.get("in_reply_to_id") or c["id"]), int(c["id"]),
+                                     author, body, kind="review_comment"))
+        for r in self._pages(f"{self._repo}/pulls/{pr_id}/reviews"):
+            author, body, state = str(r["user"]["login"]), str(r.get("body") or ""), r["state"]
+            changes = state == "CHANGES_REQUESTED"
+            if author == me or state == "PENDING" or not (body.strip() or changes):
+                continue
+            out.append(PrComment(0, int(r["id"]), author,
+                                 body.strip() or "(changes requested with no summary)",
+                                 kind="review", changes_requested=changes))
+        return out
+
+    def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
+        if self._dry_run:
+            log.info("dry-run: would reply on PR %s: %s", pr_id, text)
+            return
+        if comment.kind == "review_comment":
+            self._req("POST",
+                      f"{self._repo}/pulls/{pr_id}/comments/{comment.thread_id}/replies",
+                      json={"body": text})
+            return
+        quoted = "\n".join(f"> {line}" for line in comment.content[:300].splitlines())
+        self.comment_pr(pr_id, f"{quoted}\n\n@{comment.author} {text}")
+
+    def comment_pr(self, pr_id: int, text: str) -> None:
+        if self._dry_run:
+            log.info("dry-run: would comment on PR %s: %s", pr_id, text)
+            return
+        self._req("POST", f"{self._repo}/issues/{pr_id}/comments", json={"body": text})
+
+    def delete_branch(self, branch: str) -> None:
+        self._check_branch(branch)
+        if self._dry_run:
+            log.info("dry-run: would delete branch %s", branch)
+            return
+        self._req("DELETE", f"{self._repo}/git/refs/heads/{branch}", ok=(404, 422))
