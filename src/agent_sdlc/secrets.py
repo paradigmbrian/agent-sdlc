@@ -34,6 +34,10 @@ def get_secret(service: str, env_var: str) -> str:
     raise SecretNotFound(f"set {env_var} or add keychain item '{service}'")
 
 
+def github_app_key(app_id: int) -> tuple[str, str]:
+    return (f"agent-sdlc-github-app-{app_id}", "AGENT_SDLC_GITHUB_APP_KEY")
+
+
 def basic_auth_header(pat: str) -> str:
     token = base64.b64encode(f":{pat}".encode()).decode()
     return f"Authorization: Basic {token}"
