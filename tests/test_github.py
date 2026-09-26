@@ -156,3 +156,32 @@ def test_list_closed_limits_and_drops_prs() -> None:
     respx.get(f"{REPO}/issues").mock(return_value=httpx.Response(200, json=[
         issue(1), issue(2, pr=True), issue(3), issue(4)]))
     assert [i.id for i in forge().list_closed(2)] == [1, 3]
+
+
+@respx.mock
+def test_list_closed_limit_applies_after_pr_filtering() -> None:
+    """When page 1 has many PRs, limit should apply to issues after filtering."""
+    # Page 1: issues 1-10, with PRs at positions where i % 2 == 0 (5 PRs, 5 issues)
+    page1 = [issue(i, pr=(i % 2 == 0)) for i in range(1, 101)]  # 50 PRs, 50 issues
+    # Page 2: more issues
+    page2 = [issue(i) for i in range(101, 111)]  # 10 more issues
+    respx.get(f"{REPO}/issues", params={"page": "1"}).mock(
+        return_value=httpx.Response(200, json=page1))
+    respx.get(f"{REPO}/issues", params={"page": "2"}).mock(
+        return_value=httpx.Response(200, json=page2))
+    result = forge().list_closed(10)
+    assert len(result) == 10
+    # Expected: first 10 issues after filtering PRs from page 1 and page 2
+    expected = [1, 3, 5, 7, 9, 11, 13, 15, 17, 19]
+    assert [i.id for i in result] == expected
+
+
+@respx.mock
+def test_429_uses_retry_after_when_ratelimit_reset_absent() -> None:
+    """429 with Retry-After header should report retry time (not 'unknown')."""
+    respx.get(f"{REPO}/issues/5").mock(return_value=httpx.Response(
+        429, headers={"Retry-After": "60"}))
+    f = forge()
+    with pytest.raises(ForgeError, match="rate limit.*retry after 60 s") as e:
+        f.get_item(5)
+    assert "ghs_" not in str(e.value)

@@ -67,8 +67,15 @@ class GitHubForge:
             return None
         if r.status_code == 429 or (
                 r.status_code == 403 and r.headers.get("x-ratelimit-remaining") == "0"):
-            raise ForgeError(f"GitHub rate limit on {method} {path}; resets at "
-                             f"{r.headers.get('x-ratelimit-reset', 'unknown')}")
+            reset_time = r.headers.get("x-ratelimit-reset")
+            if not reset_time and r.status_code == 429:
+                # Secondary rate limit: Retry-After is seconds to wait
+                retry_after = r.headers.get("Retry-After")
+                if retry_after:
+                    reset_time = f"retry after {retry_after} s"
+            if not reset_time:
+                reset_time = "unknown"
+            raise ForgeError(f"GitHub rate limit on {method} {path}; resets at {reset_time}")
         if r.status_code >= 400:
             raise ForgeError(f"GitHub {method} {path} failed: HTTP {r.status_code}")
         return r.json() if r.content else None
@@ -120,11 +127,20 @@ class GitHubForge:
         return [self._to_item(i) for i in raw if "pull_request" not in i]
 
     def list_closed(self, limit: int) -> list[WorkItem]:
-        raw = self._pages(f"{self._repo}/issues", {"state": "closed",
-                                                  "labels": self._intake.label,
-                                                  "sort": "updated", "direction": "desc"},
-                          limit=limit)
-        return [self._to_item(i) for i in raw if "pull_request" not in i][:limit]
+        out: list[WorkItem] = []
+        for page in range(1, _MAX_PAGES + 1):
+            batch = self._req("GET", f"{self._repo}/issues",
+                              params={"state": "closed", "labels": self._intake.label,
+                                      "sort": "updated", "direction": "desc",
+                                      "per_page": _PER_PAGE, "page": page})
+            for i in batch:
+                if "pull_request" not in i:
+                    out.append(self._to_item(i))
+                    if len(out) >= limit:
+                        return out
+            if len(batch) < _PER_PAGE:
+                break
+        return out
 
     def get_item(self, id: int) -> WorkItem:
         i = self._req("GET", f"{self._repo}/issues/{id}")
