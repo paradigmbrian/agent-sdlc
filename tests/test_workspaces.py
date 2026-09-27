@@ -1,11 +1,13 @@
 import os
+import shutil
+import threading
 import time
 from pathlib import Path
 
 import pytest
 
 from agent_sdlc.targets import TargetConfig
-from agent_sdlc.workspaces import Workspaces, git_env, slugify
+from agent_sdlc.workspaces import GitError, MergeConflict, Workspaces, git_env, slugify
 from tests.conftest import git
 
 
@@ -240,3 +242,132 @@ def test_git_auth_callable_is_called_for_every_authenticated_git_call(
     ws.create(1, "agent/1-a")   # clone (auth)
     ws.create(2, "agent/2-b")   # fetch (auth)
     assert len(calls) == 2
+
+
+BR = "agent/1-a"
+
+
+def _pushed(ws: Workspaces, origin: Path) -> Path:
+    """A worktree with one agent commit pushed to origin's BR."""
+    wt = ws.create(1, BR)
+    (wt / "a.txt").write_text("agent\n")
+    ws.commit(wt, "feat: a")
+    git("push", "-q", str(origin), f"HEAD:refs/heads/{BR}", cwd=wt)
+    return wt
+
+
+def _human_push(tmp_path: Path, origin: Path, files: dict[str, str | None]) -> None:
+    """Clone origin, apply `files` on BR (None deletes), commit as a human, push."""
+    h = tmp_path / "human"
+    if not h.exists():
+        git("clone", "-q", str(origin), str(h), cwd=tmp_path)
+    git("fetch", "-q", "origin", cwd=h)
+    git("checkout", "-q", "-B", BR, f"origin/{BR}", cwd=h)
+    for name, content in files.items():
+        p = h / name
+        if content is None:
+            git("rm", "-q", name, cwd=h)
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+    git("add", "-A", cwd=h)
+    git("-c", "user.name=h", "-c", "user.email=h@h", "commit", "-qm", "human", cwd=h)
+    git("push", "-q", "origin", f"HEAD:refs/heads/{BR}", cwd=h)
+
+
+def test_concurrent_create_both_succeed(ws: Workspaces) -> None:
+    barrier, errors = threading.Barrier(2), []
+
+    def make(n: int) -> None:
+        barrier.wait(5)
+        try:
+            ws.create(n, f"agent/{n}-x")
+        except Exception as e:  # noqa: BLE001 - collected for the assertion
+            errors.append(e)
+
+    threads = [threading.Thread(target=make, args=(n,)) for n in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert errors == []
+    assert (ws.worktree_path(1) / "check.sh").exists()
+    assert (ws.worktree_path(2) / "check.sh").exists()
+
+
+def test_commit_tracked_only_skips_untracked(ws: Workspaces) -> None:
+    wt = ws.create(1, BR)
+    (wt / "build.txt").write_text("out")
+    assert ws.commit(wt, "style", tracked_only=True) is False
+    (wt / "README.md").write_text("changed\n")
+    assert ws.has_tracked_changes(wt) is True
+    assert ws.commit(wt, "style", tracked_only=True) is True
+    assert "build.txt" not in git("ls-files", cwd=wt)
+    assert ws.has_tracked_changes(wt) is False
+
+
+def test_blobs_marks_absent_paths_deleted(ws: Workspaces) -> None:
+    wt = ws.create(1, BR)
+    b = ws.blobs(wt, ["README.md", "nope.txt"])
+    assert b["nope.txt"] == "deleted" and len(b["README.md"]) == 40
+    assert ws.head(wt) == git("rev-parse", "HEAD", cwd=wt).strip()
+
+
+def test_diff_lines_can_be_limited_to_paths(ws: Workspaces) -> None:
+    wt = ws.create(1, BR)
+    (wt / "a.txt").write_text("1\n2\n")
+    (wt / "b.txt").write_text("1\n")
+    ws.commit(wt, "feat")
+    assert ws.diff_lines(wt) == 3 and ws.diff_lines(wt, ["b.txt"]) == 1
+
+
+def test_incorporate_fast_forwards_human_commits(
+    ws: Workspaces, tmp_path: Path, origin_repo: Path
+) -> None:
+    wt = _pushed(ws, origin_repo)
+    _human_push(tmp_path, origin_repo, {"h.txt": "human\n"})
+    assert ws.incorporate_remote(wt, BR) == ["h.txt"]
+    assert (wt / "h.txt").read_text() == "human\n"
+
+
+def test_incorporate_merges_diverged_history(
+    ws: Workspaces, tmp_path: Path, origin_repo: Path
+) -> None:
+    wt = _pushed(ws, origin_repo)
+    _human_push(tmp_path, origin_repo, {"h.txt": "human\n"})
+    (wt / "local.txt").write_text("unpushed\n")
+    ws.commit(wt, "feat: local")
+    assert ws.incorporate_remote(wt, BR) == ["h.txt"]
+    assert (wt / "h.txt").exists() and (wt / "local.txt").exists()
+
+
+def test_incorporate_conflict_aborts_and_raises(
+    ws: Workspaces, tmp_path: Path, origin_repo: Path
+) -> None:
+    wt = _pushed(ws, origin_repo)
+    _human_push(tmp_path, origin_repo, {"a.txt": "human\n"})
+    (wt / "a.txt").write_text("agent again\n")
+    ws.commit(wt, "feat: again")
+    with pytest.raises(MergeConflict) as e:
+        ws.incorporate_remote(wt, BR)
+    assert e.value.files == ["a.txt"]
+    assert git("status", "--porcelain", cwd=wt) == ""
+
+
+def test_incorporate_nothing_new_returns_empty(ws: Workspaces, origin_repo: Path) -> None:
+    wt = _pushed(ws, origin_repo)
+    assert ws.incorporate_remote(wt, BR) == []
+
+
+def test_incorporate_missing_remote_branch_returns_empty(ws: Workspaces) -> None:
+    wt = ws.create(1, BR)                      # never pushed, or deleted by a human
+    assert ws.incorporate_remote(wt, BR) == []
+
+
+def test_incorporate_unreachable_remote_raises_git_error(
+    ws: Workspaces, origin_repo: Path
+) -> None:
+    wt = ws.create(1, BR)
+    shutil.move(str(origin_repo), str(origin_repo) + ".gone")
+    with pytest.raises(GitError):
+        ws.incorporate_remote(wt, BR)

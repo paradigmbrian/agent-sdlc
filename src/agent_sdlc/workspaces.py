@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -37,6 +38,14 @@ _GIT_ID = ["-c", "user.name=agent-sdlc", "-c", "user.email=agent-sdlc@localhost"
 
 class GitError(Exception):
     pass
+
+
+class MergeConflict(Exception):
+    """Human commits on the PR branch conflict with the agent's (spec §3.1)."""
+
+    def __init__(self, files: list[str]) -> None:
+        super().__init__("merge conflict: " + (", ".join(files) or "(no files reported)"))
+        self.files = files
 
 
 def slugify(text: str, max_len: int = 40) -> str:
@@ -104,26 +113,19 @@ class Workspaces:
         self.home = self._root / "home"  # scratch HOME for repo commands and agent sessions
         self._cmd_env = safe_env({**_read_env_template(target.repo.env_template),
                                   "HOME": str(self.home)})
+        self._base_lock = threading.Lock()  # guards the shared base .git (spec §1)
 
-    def _git(
-        self,
-        *args: str,
-        cwd: Path,
-        auth: bool = False,
-        check: bool = True,
-    ) -> str:
+    def _run_git(self, *args: str, cwd: Path,
+                 auth: bool = False) -> subprocess.CompletedProcess[str]:
         cmd = ["git"]
         if auth and self._auth is not None:
             # Fetched per call: GitHub installation tokens expire after an hour.
             cmd += ["-c", f"http.extraheader={self._auth()}"]
-        cmd += list(args)
-        r = subprocess.run(
-            cmd,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            env=git_env(self.home),
-        )
+        return subprocess.run([*cmd, *args], cwd=cwd, capture_output=True, text=True,
+                              env=git_env(self.home))
+
+    def _git(self, *args: str, cwd: Path, auth: bool = False, check: bool = True) -> str:
+        r = self._run_git(*args, cwd=cwd, auth=auth)
         if check and r.returncode != 0:
             raise GitError(f"git {args[0]} failed: {r.stderr.strip()}")
         return r.stdout
@@ -147,19 +149,13 @@ class Workspaces:
 
     def create(self, item_id: int, branch: str) -> Path:
         path = self.worktree_path(item_id)
-        if path.exists():
-            return path
-        self._ensure_base()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._git(
-            "worktree",
-            "add",
-            "-B",
-            branch,
-            str(path),
-            f"origin/{self._t.repo.base_branch}",
-            cwd=self._base,
-        )
+        with self._base_lock:
+            if path.exists():
+                return path
+            self._ensure_base()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._git("worktree", "add", "-B", branch, str(path),
+                      f"origin/{self._t.repo.base_branch}", cwd=self._base)
         return path
 
     def reset(self, wt: Path) -> None:
@@ -222,17 +218,21 @@ class Workspaces:
         return [self.run(name, cmd, wt, log_for(name) if log_for else None)
                 for name, cmd in self._t.repo.commands.items()]
 
-    def commit(self, wt: Path, message: str) -> bool:
-        self._git("add", "-A", cwd=wt)
-        staged = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=wt,
-            env=git_env(self.home),
-        ).returncode
+    def commit(self, wt: Path, message: str, tracked_only: bool = False) -> bool:
+        # tracked_only: never commit untracked output such as builds or coverage (spec §4.2).
+        self._git("add", "-u" if tracked_only else "-A", cwd=wt)
+        staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=wt,
+                                env=git_env(self.home)).returncode
         if staged == 0:
             return False
         self._git(*_GIT_ID, "commit", "--no-verify", "-m", message, cwd=wt)
         return True
+
+    def head(self, wt: Path) -> str:
+        return self._git("rev-parse", "HEAD", cwd=wt).strip()
+
+    def has_tracked_changes(self, wt: Path) -> bool:
+        return bool(self._git("diff", "--name-only", "HEAD", cwd=wt).strip())
 
     def _range(self) -> str:
         return f"origin/{self._t.repo.base_branch}...HEAD"
@@ -241,13 +241,15 @@ class Workspaces:
         out = self._git("diff", "--name-only", self._range(), cwd=wt)
         return sorted(line for line in out.splitlines() if line)
 
-    def diff_lines(self, wt: Path) -> int:
+    def diff_lines(self, wt: Path, paths: list[str] | None = None) -> int:
+        keep = None if paths is None else set(paths)
         total = 0
         for line in self._git("diff", "--numstat", self._range(), cwd=wt).splitlines():
-            added, deleted, _ = line.split("\t", 2)
+            added, deleted, path = line.split("\t", 2)
+            if keep is not None and path not in keep:
+                continue
             total += (int(added) if added != "-" else 0) + (
-                int(deleted) if deleted != "-" else 0
-            )
+                int(deleted) if deleted != "-" else 0)
         return total
 
     def diff(self, wt: Path, max_chars: int = 60000, paths: list[str] | None = None,
@@ -256,28 +258,63 @@ class Workspaces:
         flags = ["--stat"] if stat else []
         return self._git("diff", *flags, self._range(), *extra, cwd=wt)[:max_chars]
 
-    def blob_digest(self, wt: Path, paths: list[str]) -> str:
-        """sha256 over (path, blob at HEAD) for `paths`; a path absent at HEAD counts as
-        deleted, so removing a manifest changes the digest too."""
-        blobs: dict[str, str] = {}
+    def blobs(self, wt: Path, paths: list[str]) -> dict[str, str]:
+        """Blob id at HEAD for each path; "deleted" when the path is absent."""
+        found: dict[str, str] = {}
         if paths:
             out = self._git("ls-tree", "-z", "HEAD", "--", *paths, cwd=wt)
             for entry in filter(None, out.split("\0")):
                 meta, path = entry.split("\t", 1)
-                blobs[path] = meta.split()[2]
-        lines = [f"{p}:{blobs.get(p, 'deleted')}" for p in sorted(paths)]
+                found[path] = meta.split()[2]
+        return {p: found.get(p, "deleted") for p in paths}
+
+    def blob_digest(self, wt: Path, paths: list[str]) -> str:
+        """sha256 over (path, blob at HEAD) for `paths`; a path absent at HEAD counts as
+        deleted, so removing a manifest changes the digest too."""
+        b = self.blobs(wt, paths)
+        lines = [f"{p}:{b[p]}" for p in sorted(paths)]
         return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
     def tracked_files(self, wt: Path) -> list[str]:
         out = self._git("ls-tree", "-r", "-z", "--name-only", "HEAD", cwd=wt)
         return sorted(p for p in out.split("\0") if p)
 
+    def _is_ancestor(self, a: str, b: str, wt: Path) -> bool:
+        return self._run_git("merge-base", "--is-ancestor", a, b, cwd=wt).returncode == 0
+
+    def _names(self, *args: str, wt: Path) -> list[str]:
+        return sorted(filter(None, self._git(*args, cwd=wt).splitlines()))
+
+    def incorporate_remote(self, wt: Path, branch: str) -> list[str]:
+        """Bring commits a human pushed to the PR branch into the worktree (spec §3.1).
+        Returns the paths they changed. Raises MergeConflict (after aborting the merge) when
+        the histories conflict, and GitError when the remote cannot be read."""
+        with self._base_lock:
+            r = self._run_git("fetch", "origin", f"refs/heads/{branch}", cwd=wt, auth=True)
+        if r.returncode != 0:
+            if "couldn't find remote ref" in r.stderr.lower():
+                return []                      # never pushed, or deleted by a human
+            raise GitError(f"git fetch failed: {r.stderr.strip()}")
+        old = self.head(wt)
+        tip = self._git("rev-parse", "FETCH_HEAD", cwd=wt).strip()
+        if self._is_ancestor(tip, old, wt):
+            return []
+        if self._is_ancestor(old, tip, wt):
+            self._git("merge", "--ff-only", tip, cwd=wt)
+        elif self._run_git(*_GIT_ID, "merge", "--no-edit", tip, cwd=wt).returncode != 0:
+            files = self._names("diff", "--name-only", "--diff-filter=U", wt=wt)
+            self._git("merge", "--abort", cwd=wt, check=False)
+            raise MergeConflict(files)
+        return self._names("diff", "--name-only", old, "HEAD", wt=wt)
+
     def remove(self, item_id: int, branch: str) -> None:
         path = self.worktree_path(item_id)
-        if not self._base.exists():
-            return
-        if path.exists():
-            self._git("worktree", "remove", "--force", str(path), cwd=self._base, check=False)
-            shutil.rmtree(path, ignore_errors=True)
-        self._git("worktree", "prune", cwd=self._base, check=False)
-        self._git("branch", "-D", branch, cwd=self._base, check=False)
+        with self._base_lock:
+            if not self._base.exists():
+                return
+            if path.exists():
+                self._git("worktree", "remove", "--force", str(path), cwd=self._base,
+                          check=False)
+                shutil.rmtree(path, ignore_errors=True)
+            self._git("worktree", "prune", cwd=self._base, check=False)
+            self._git("branch", "-D", branch, cwd=self._base, check=False)
