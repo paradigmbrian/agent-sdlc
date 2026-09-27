@@ -213,17 +213,20 @@ class StageExecutor:
         return self._ws.diff_lines(wt, self._agent_owned(item, wt, self._ws.changed_files(wt)))
 
     def _incorporate(self, item: Item, wt: Path) -> Item | StepResult:
-        """Merge commits a human pushed to the PR branch and record the blobs of every path
-        they touched (spec §3.1). A conflict parks for a human."""
+        """Merge commits a human pushed to the PR branch, then recompute item.data["human_blobs"]
+        from the branch's full history (spec §3.1): derived fresh each round rather than kept as
+        stored state, so an interrupted step never leaves it stale and a human edit that git
+        auto-merged into a file the agent also touched is still judged by its own blob. A
+        conflict parks for a human."""
         try:
-            touched = self._ws.incorporate_remote(wt, item.branch)
+            self._ws.incorporate_remote(wt, item.branch)
         except MergeConflict as e:
             return StepResult(park(
                 ParkReason.NEEDS_HUMAN,
                 "PR branch has diverged and could not be merged: " + ", ".join(e.files)))
-        if not touched:
+        human = self._ws.human_blobs(wt)
+        if human == (item.data.get("human_blobs") or {}):
             return item
-        human = {**(item.data.get("human_blobs") or {}), **self._ws.blobs(wt, touched)}
         return replace(item, data={**item.data, "human_blobs": human})
 
     def _policy_park(self, item: Item, wt: Path, when: str) -> StepResult | None:

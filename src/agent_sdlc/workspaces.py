@@ -33,7 +33,8 @@ _SAFE_ENV_KEYS = (
 )
 _OUTPUT_TAIL = 8000
 _REAP_S = 10  # after killing a timed-out group, wait this long for its pipes to close
-_GIT_ID = ["-c", "user.name=agent-sdlc", "-c", "user.email=agent-sdlc@localhost"]
+_AGENT_EMAIL = "agent-sdlc@localhost"
+_GIT_ID = ["-c", "user.name=agent-sdlc", "-c", f"user.email={_AGENT_EMAIL}"]
 
 
 class GitError(Exception):
@@ -258,11 +259,11 @@ class Workspaces:
         flags = ["--stat"] if stat else []
         return self._git("diff", *flags, self._range(), *extra, cwd=wt)[:max_chars]
 
-    def blobs(self, wt: Path, paths: list[str]) -> dict[str, str]:
-        """Blob id at HEAD for each path; "deleted" when the path is absent."""
+    def blobs(self, wt: Path, paths: list[str], rev: str = "HEAD") -> dict[str, str]:
+        """Blob id at `rev` for each path; "deleted" when the path is absent."""
         found: dict[str, str] = {}
         if paths:
-            out = self._git("ls-tree", "-z", "HEAD", "--", *paths, cwd=wt)
+            out = self._git("ls-tree", "-z", rev, "--", *paths, cwd=wt)
             for entry in filter(None, out.split("\0")):
                 meta, path = entry.split("\t", 1)
                 found[path] = meta.split()[2]
@@ -308,6 +309,23 @@ class Workspaces:
             self._git("merge", "--abort", cwd=wt, check=False)
             raise MergeConflict(files)
         return self._names("diff", "--name-only", old, "HEAD", wt=wt)
+
+    def human_blobs(self, wt: Path) -> dict[str, str]:
+        """Paths committed by someone other than the agent identity on the PR branch, since it
+        diverged from base, with their blob at FETCH_HEAD (spec §3.1); "deleted" when a path is
+        absent there. Derived from the worktree's own history rather than stored state, so it
+        is recomputed the same way every round. {} when nothing has been fetched yet (no
+        incorporate_remote call, or the remote branch doesn't exist)."""
+        if self._run_git("rev-parse", "--verify", "FETCH_HEAD", cwd=wt).returncode != 0:
+            return {}
+        out = self._git("log", "--no-merges", "--format=%x00%ae", "--name-only",
+                        f"origin/{self._t.repo.base_branch}..FETCH_HEAD", cwd=wt)
+        paths: set[str] = set()
+        for entry in filter(None, out.split("\x00")):
+            email, _, files = entry.partition("\n\n")
+            if email != _AGENT_EMAIL:
+                paths.update(filter(None, files.splitlines()))
+        return self.blobs(wt, sorted(paths), rev="FETCH_HEAD")
 
     def remove(self, item_id: int, branch: str) -> None:
         path = self.worktree_path(item_id)

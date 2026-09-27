@@ -10,6 +10,7 @@ from agent_sdlc.orchestrator.stages import StageExecutor
 from agent_sdlc.policy import PathPolicy
 from agent_sdlc.targets import TargetConfig
 from agent_sdlc.types import (
+    AgentInterrupted,
     AgentResult,
     Denial,
     Item,
@@ -637,6 +638,7 @@ async def test_human_manifest_edit_needs_no_approval(  # type: ignore[no-untyped
     _human(tmp_path, origin_repo, {"package.json": '{"name": "x"}\n'})
     res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
     assert res.transition.to is Stage.VERIFY
+    assert "package.json" in res.data["human_blobs"]
 
 
 async def test_human_deleting_a_protected_file_passes(  # type: ignore[no-untyped-def]
@@ -667,3 +669,49 @@ async def test_large_human_commit_does_not_trip_the_diff_limit(  # type: ignore[
     _human(tmp_path, origin_repo, {"big.txt": "".join(f"{i}\n" for i in range(500))})
     res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
     assert res.transition.to is Stage.VERIFY          # fixture max_diff_lines is 200
+    assert "big.txt" in res.data["human_blobs"]
+
+
+# --- fix round 1: human_blobs is derived from the worktree, not stored item.data -------------
+
+
+async def test_human_blobs_survive_an_interrupted_implement(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    """Finding 1: an interruption after incorporate_remote's merge must not lose track of the
+    human's paths on the retry, even though the merge commit already sits in the worktree and
+    a fresh incorporate_remote would then return []."""
+    ex, ado, ws, _, runner = parts
+    _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"human.txt": "fix\n"})
+
+    def interrupt(role, prompt, cwd):  # type: ignore[no-untyped-def]
+        raise AgentInterrupted("paused")
+
+    runner.behaviors = {"implementer": interrupt}
+    with pytest.raises(AgentInterrupted):
+        await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    runner.behaviors = {}
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.to is Stage.VERIFY
+    assert "human.txt" in res.data["human_blobs"]
+
+
+async def test_agent_auto_merged_edit_to_a_human_file_is_still_caught(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    """Finding 2: git can auto-merge the agent's unpushed edit and the human's pushed edit into
+    the same file without a conflict. The recorded human blob must be the human's own commit,
+    not the merged HEAD, so the agent's contribution is still judged (and caught: protected)."""
+    ex, ado, ws, *_ = parts
+    wt = _pr_branch(ws, ado)
+    (wt / "infra").mkdir()
+    (wt / "infra" / "main.tf").write_text("a\nb\nc\nd\ne\n")
+    ws.commit(wt, "feat: infra base")
+    ado.push_branch(wt, BRANCH)
+    _human(tmp_path, origin_repo, {"infra/main.tf": "human\nb\nc\nd\ne\n"})
+    (wt / "infra" / "main.tf").write_text("a\nb\nc\nd\nagent\n")
+    ws.commit(wt, "feat: unpushed agent edit")
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.park_reason is ParkReason.POLICY
+    assert "infra/main.tf" in res.transition.note

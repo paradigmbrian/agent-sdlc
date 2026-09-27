@@ -371,3 +371,19 @@ def test_incorporate_unreachable_remote_raises_git_error(
     shutil.move(str(origin_repo), str(origin_repo) + ".gone")
     with pytest.raises(GitError):
         ws.incorporate_remote(wt, BR)
+
+
+def test_human_blobs_returns_only_the_humans_paths_at_fetch_head(
+    ws: Workspaces, tmp_path: Path, origin_repo: Path
+) -> None:
+    wt = _pushed(ws, origin_repo)
+    _human_push(tmp_path, origin_repo, {"h.txt": "human\n"})
+    ws.incorporate_remote(wt, BR)
+    human = ws.human_blobs(wt)
+    assert human.keys() == {"h.txt"}
+    assert human["h.txt"] == ws.blobs(wt, ["h.txt"])["h.txt"]
+
+
+def test_human_blobs_empty_before_anything_is_fetched(ws: Workspaces) -> None:
+    wt = ws.create(1, BR)                      # never fetched the PR branch
+    assert ws.human_blobs(wt) == {}
