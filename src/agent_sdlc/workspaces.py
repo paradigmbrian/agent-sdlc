@@ -65,9 +65,10 @@ def safe_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 def git_env(home: Path | None = None) -> dict[str, str]:
     """Environment for orchestrator git plumbing: never reads the user's or system git config,
     so credential helpers and url.insteadOf rewrites are not used (auth is the per-command
-    http.extraheader only)."""
+    http.extraheader only). LC_ALL=C wins over safe_env's LANG/LC_ALL passthrough, so matching
+    git's stderr (e.g. "couldn't find remote ref") never depends on the operator's locale."""
     extra = {"GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null",
-             "GIT_CONFIG_NOSYSTEM": "1"}
+             "GIT_CONFIG_NOSYSTEM": "1", "LC_ALL": "C"}
     if home is not None:
         extra["HOME"] = str(home)
     return safe_env(extra)

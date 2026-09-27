@@ -145,6 +145,16 @@ def test_c2_git_env_ignores_user_git_config(tmp_path: Path) -> None:
     assert env["GIT_TERMINAL_PROMPT"] == "0" and env["HOME"] == str(tmp_path / "home")
 
 
+def test_git_env_forces_c_locale_regardless_of_the_operator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 6: stderr matching (e.g. "couldn't find remote ref") must not depend on the
+    operator's locale."""
+    monkeypatch.setenv("LANG", "fr_FR.UTF-8")
+    monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+    assert git_env()["LC_ALL"] == "C"
+
+
 def test_c2_user_insteadof_rewrite_is_not_used(
     tmp_path: Path, target: TargetConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
