@@ -219,7 +219,7 @@ async def test_m9_lint_fix_commit_rechecks_diff_limit(  # type: ignore[no-untype
     tmp_path: Path, target: TargetConfig, origin_repo: Path
 ) -> None:
     fixer = target.model_copy(update={"repo": target.repo.model_copy(
-        update={"commands": {"lint": "seq 1 300 > generated.txt"}})})
+        update={"commands": {"lint": "seq 1 300 >> README.md"}})})
     ado = FakeForge(origin=origin_repo)
     ado.add(WI)
     ws = Workspaces(tmp_path / "ws", fixer)
@@ -229,6 +229,54 @@ async def test_m9_lint_fix_commit_rechecks_diff_limit(  # type: ignore[no-untype
     res = await ex.run(item(Stage.VERIFY))
     assert res.transition.park_reason is ParkReason.POLICY
     assert "300" in res.transition.note and "200" in res.transition.note
+
+
+def _verifier(tmp_path: Path, target: TargetConfig, origin_repo: Path, lint: str):  # type: ignore[no-untyped-def]
+    t = target.model_copy(update={"repo": target.repo.model_copy(
+        update={"commands": {"test": "sh check.sh", "lint": lint}})})
+    ado = FakeForge(origin=origin_repo)
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", t)
+    ex = StageExecutor(target=t, forge=ado, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(t.policy.protected_paths),
+                       decisions_for=lambda _id: [])
+    return ex, ws
+
+
+def _passes(res) -> list[int]:  # type: ignore[no-untyped-def]
+    return [e.payload["pass"] for e in res.events if e.kind == "check" and "pass" in e.payload]
+
+
+async def test_untracked_check_output_is_not_committed(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, ws = _verifier(tmp_path, target, origin_repo, "echo out > build.txt")
+    res = await ex.run(item(Stage.VERIFY))
+    wt = ws.worktree_path(5)
+    assert res.transition.to is Stage.REVIEW and _passes(res) == [1, 1]
+    assert "build.txt" not in git("ls-files", cwd=wt)
+
+
+async def test_lint_fix_is_committed_then_verified_once_more(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, ws = _verifier(tmp_path, target, origin_repo,
+                       "grep -q fixed README.md || echo fixed >> README.md")
+    res = await ex.run(item(Stage.VERIFY))
+    wt = ws.worktree_path(5)
+    assert res.transition.to is Stage.REVIEW and _passes(res) == [1, 1, 2, 2]
+    assert "style: apply lint fixes" in git("log", "--format=%s", cwd=wt)
+
+
+async def test_non_idempotent_fix_is_discarded_after_the_second_pass(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    ex, ws = _verifier(tmp_path, target, origin_repo, "echo x >> README.md")
+    res = await ex.run(item(Stage.VERIFY))
+    wt = ws.worktree_path(5)
+    assert _passes(res) == [1, 1, 2, 2]
+    assert git("status", "--porcelain", cwd=wt) == ""
+    assert git("show", "HEAD:README.md", cwd=wt) == "fixture\nx\n"
 
 
 T0 = datetime(2026, 10, 2, 19, 4, 12, tzinfo=UTC)

@@ -24,9 +24,12 @@ def agent_events(res: AgentResult) -> list[EventInput]:
     return events
 
 
-def check_event(r: CommandResult) -> EventInput:
-    return EventInput("check", {"name": r.name, "command": r.command, "exit_code": r.exit_code,
-                                "duration_s": r.duration_s, "log": r.log})
+def check_event(r: CommandResult, pass_: int | None = None) -> EventInput:
+    payload = {"name": r.name, "command": r.command, "exit_code": r.exit_code,
+               "duration_s": r.duration_s, "log": r.log}
+    if pass_ is not None:
+        payload["pass"] = pass_          # verify runs checks twice after lint fixes (§4.2)
+    return EventInput("check", payload)
 
 
 def transition_event(before: Item, after: Item) -> EventInput:

@@ -376,30 +376,47 @@ class StageExecutor:
         failed_install, inst_data, events = self._ensure_installed(item, wt)
         if failed_install:
             return failed_install
-        results = self._ws.run_checks(
-            wt, log_for=lambda name: self._trace_path(item, name, "log"))
-        events += [check_event(r) for r in results]
-        for r in results:
-            log.info("check %s: exit %s (%ss)", r.name, r.exit_code, r.duration_s)
-        if self._ws.commit(wt, "style: apply lint fixes"):
-            changed = self._agent_owned(item, wt, self._ws.changed_files(wt))
-            violations = self._pp.violations(changed)
-            if violations:
-                return StepResult(park(
-                    ParkReason.POLICY,
-                    "Lint fixes touched protected paths: " + ", ".join(violations)),
-                    events=events, data=inst_data)
-            if gate := self._manifest_gate(item, wt, Stage.VERIFY):
-                return replace(gate, events=events, data={**inst_data, **gate.data})
-            lines, limit = self._agent_diff_lines(item, wt), self._t.policy.max_diff_lines
-            if lines > limit:  # M9
-                return StepResult(park(
-                    ParkReason.POLICY,
-                    f"After lint fixes the diff is {lines} lines, over the {limit}-line limit."),
-                    events=events, data=inst_data)
+        results = self._checks(item, wt, 1, events)
+        if self._ws.commit(wt, "style: apply lint fixes", tracked_only=True):
+            if parked := self._after_lint_commit(item, wt, events, inst_data):
+                return parked
+            results = self._checks(item, wt, 2, events)
+            if self._ws.has_tracked_changes(wt):
+                log.warning("checks changed tracked files again; discarding them "
+                            "(the fixer is not idempotent)")
+                self._ws.reset(wt)
         t = after_verify(results, item.attempt, self._t.limits.max_verify_retries)
         return StepResult(t, data={"checks": [_check_dict(r) for r in results], **inst_data},
                           events=events)
+
+    def _checks(self, item: Item, wt: Path, pass_: int,
+                events: list[EventInput]) -> list[CommandResult]:
+        suffix = "" if pass_ == 1 else f"-p{pass_}"
+        results = self._ws.run_checks(
+            wt, log_for=lambda name: self._trace_path(item, f"{name}{suffix}", "log"))
+        events += [check_event(r, pass_) for r in results]
+        for r in results:
+            log.info("check %s (pass %s): exit %s (%ss)", r.name, pass_, r.exit_code,
+                     r.duration_s)
+        return results
+
+    def _after_lint_commit(self, item: Item, wt: Path, events: list[EventInput],
+                           inst_data: dict[str, Any]) -> StepResult | None:
+        """The checks a lint-fix commit must pass before the re-verify (M9, spec §4.2)."""
+        violations = self._pp.violations(self._agent_owned(item, wt, self._ws.changed_files(wt)))
+        if violations:
+            return StepResult(park(
+                ParkReason.POLICY, "Lint fixes touched protected paths: " + ", ".join(violations)),
+                events=events, data=inst_data)
+        if gate := self._manifest_gate(item, wt, Stage.VERIFY):
+            return replace(gate, events=events, data={**inst_data, **gate.data})
+        lines, limit = self._agent_diff_lines(item, wt), self._t.policy.max_diff_lines
+        if lines > limit:
+            return StepResult(park(
+                ParkReason.POLICY,
+                f"After lint fixes the diff is {lines} lines, over the {limit}-line limit."),
+                events=events, data=inst_data)
+        return None
 
     async def _review(self, item: Item) -> StepResult:
         wi = self._forge.get_item(item.external_id)
