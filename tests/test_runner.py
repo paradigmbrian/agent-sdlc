@@ -95,6 +95,31 @@ def test_check_tool_bash_no_path_escape(tmp_path: Path) -> None:
     assert chk("npm run lint") is None
 
 
+def test_r3_bash_allows_absolute_looking_patterns_that_are_not_paths(tmp_path: Path) -> None:
+    def chk(cmd: str) -> str | None:
+        return check_tool(IMPLEMENTER, tmp_path, PP, CommandPolicy([]), "Bash", {"command": cmd})
+
+    assert chk('grep -rn "/api/users" src') is None
+    assert chk('rg "/v1/" .') is None
+    assert chk("git log --grep=/api/x") is None
+
+
+def test_r3_bash_still_denies_real_or_expandable_outside_paths(tmp_path: Path) -> None:
+    cp = CommandPolicy(["npm run lint"])
+
+    def chk(cmd: str) -> str | None:
+        return check_tool(IMPLEMENTER, tmp_path, PP, cp, "Bash", {"command": cmd})
+
+    assert chk("cat /etc/hosts") == "path is outside the worktree: /etc/hosts"
+    assert chk("grep x /etc/*") == "path is outside the worktree: /etc/*"
+    assert chk("cat /etc/{hosts,x}") == "path is outside the worktree: /etc/{hosts,x}"
+    assert chk("grep x /etc/hosts(N)") == "path is outside the worktree: /etc/hosts(N)"
+    assert chk("cat ~nobody-x") == "path is outside the worktree: ~nobody-x"
+    # Target commands may write, so they keep the strict check.
+    assert chk("npm run lint /nonexistent-r3") == \
+        "path is outside the worktree: /nonexistent-r3"
+
+
 def test_check_tool_bash_symlink_escape(tmp_path: Path) -> None:
     root = tmp_path / "wt"
     root.mkdir()

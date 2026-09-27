@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,42 @@ def test_command_timeout(tmp_path: Path, target: TargetConfig) -> None:
     ws = Workspaces(tmp_path / "w", slow)
     [r] = ws.run_checks(ws.create(1, "agent/1-a"))
     assert r.exit_code == 124 and "timed out" in r.output
+
+
+def _gone(pid: int, wait_s: float = 3.0) -> bool:
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _with_command(target: TargetConfig, command: str, timeout_s: int) -> TargetConfig:
+    return target.model_copy(update={"repo": target.repo.model_copy(
+        update={"commands": {"test": command}, "command_timeout_s": timeout_s})})
+
+
+def test_r1_timeout_kills_the_whole_process_group(tmp_path: Path,
+                                                   target: TargetConfig) -> None:
+    ws = Workspaces(tmp_path / "w", _with_command(
+        target, "sleep 30 & echo $! > child.pid; sleep 30", timeout_s=1))
+    wt = ws.create(1, "agent/1-a")
+    [r] = ws.run_checks(wt)
+    assert r.exit_code == 124
+    assert _gone(int((wt / "child.pid").read_text()))
+
+
+def test_r1_finished_command_leaves_no_background_children(tmp_path: Path,
+                                                           target: TargetConfig) -> None:
+    ws = Workspaces(tmp_path / "w", _with_command(
+        target, "sleep 30 >/dev/null 2>&1 & echo $! > child.pid", timeout_s=10))
+    wt = ws.create(1, "agent/1-a")
+    [r] = ws.run_checks(wt)
+    assert r.ok
+    assert _gone(int((wt / "child.pid").read_text()))
 
 
 def test_command_env_excludes_secrets(ws: Workspaces, monkeypatch: pytest.MonkeyPatch) -> None:

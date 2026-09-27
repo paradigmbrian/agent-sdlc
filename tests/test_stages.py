@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_sdlc.adapters.errors import ForgeError
 from agent_sdlc.orchestrator.stages import StageExecutor
 from agent_sdlc.policy import PathPolicy
 from agent_sdlc.targets import TargetConfig
@@ -118,6 +119,24 @@ async def test_pr_open_updates_existing_pr(parts) -> None:  # type: ignore[no-un
     pr = ado.create_pr("agent/5-add-feature", "t", "b", 5)
     res = await ex.run(item(Stage.PR_OPEN, pr_id=pr, data={"plan": "p", "checks": []}))
     assert res.pr_id == pr and ado.prs[pr]["updates"] == 1
+
+
+async def test_r2_plan_comment_failure_keeps_the_new_pr(  # type: ignore[no-untyped-def]
+    parts,
+) -> None:
+    ex, ado, ws, *_ = parts
+
+    def boom(id: int, html: str) -> None:
+        raise ForgeError("comment failed")
+
+    ado.comment_item = boom
+    wt = ws.create(5, "agent/5-add-feature")
+    (wt / "feature.txt").write_text("x")
+    ws.commit(wt, "feat: x")
+    res = await ex.run(item(Stage.PR_OPEN, data={"plan": "p", "checks": []}))
+    assert res.transition.to is Stage.AWAITING_HUMAN and res.pr_id == 100
+    [ev] = [e for e in res.events if e.kind == "plan_comment_failed"]
+    assert "comment failed" in ev.payload["error"]
 
 
 async def test_awaiting_handles_comments(parts) -> None:  # type: ignore[no-untyped-def]

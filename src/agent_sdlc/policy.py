@@ -98,6 +98,14 @@ _RG_EXEC = ("--pre", "--pre-glob")
 _TREE_WRITE_SHORT = set("oR")
 
 
+def is_read_only(argv: list[str]) -> bool:
+    """True for the built-in read-only commands (not target commands, which may write)."""
+    if not argv:
+        return False
+    return argv[0] in _READONLY or (argv[0] == "git" and len(argv) > 1
+                                    and argv[1] in _GIT_READONLY)
+
+
 def _rg_exec(argv: list[str]) -> bool:
     return any(a in _RG_EXEC or a.startswith(tuple(f"{f}=" for f in _RG_EXEC)) for a in argv)
 

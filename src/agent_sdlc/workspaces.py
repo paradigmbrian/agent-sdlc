@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 from collections.abc import Callable
@@ -29,6 +31,7 @@ _SAFE_ENV_KEYS = (
     "TERM",
 )
 _OUTPUT_TAIL = 8000
+_REAP_S = 10  # after killing a timed-out group, wait this long for its pipes to close
 _GIT_ID = ["-c", "user.name=agent-sdlc", "-c", "user.email=agent-sdlc@localhost"]
 
 
@@ -70,6 +73,12 @@ def _read_env_template(path: Path | None) -> dict[str, str]:
             k, v = line.split("=", 1)
             out[k.strip()] = v.strip().strip('"')
     return out
+
+
+def _kill_group(pgid: int) -> None:
+    """SIGKILL every process in the group a command's session started (R1)."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 def _write_log(path: Path, command: str, output: str, code: int) -> str | None:
@@ -160,21 +169,31 @@ class Workspaces:
     def run(self, name: str, command: str, wt: Path, log: Path | None = None) -> CommandResult:
         self.home.mkdir(parents=True, exist_ok=True)
         start = time.monotonic()
+        # shell=True is deliberate: commands come only from the trusted target YAML,
+        # never from agents or work item text. Its own session lets us kill everything it
+        # started, not just the shell (R1).
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=wt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self._cmd_env,
+            start_new_session=True,
+        )
         try:
-            # shell=True is deliberate: commands come only from the trusted target YAML,
-            # never from agents or work item text.
-            r = subprocess.run(
-                command,
-                shell=True,
-                cwd=wt,
-                capture_output=True,
-                text=True,
-                env=self._cmd_env,
-                timeout=self._t.repo.command_timeout_s,
-            )
-            code, out = r.returncode, (r.stdout + r.stderr)
+            stdout, stderr = proc.communicate(timeout=self._t.repo.command_timeout_s)
+            code, out = proc.returncode, stdout + stderr
         except subprocess.TimeoutExpired:
+            _kill_group(proc.pid)
+            try:
+                proc.communicate(timeout=_REAP_S)
+            except subprocess.TimeoutExpired:  # a child escaped the group and holds the pipes
+                proc.kill()
+                proc.wait()
             code, out = 124, f"timed out after {self._t.repo.command_timeout_s}s"
+        _kill_group(proc.pid)  # background children the command left behind
         written = _write_log(log, command, out, code) if log is not None else None
         return CommandResult(
             name, command, code, out[-_OUTPUT_TAIL:], round(time.monotonic() - start, 2),

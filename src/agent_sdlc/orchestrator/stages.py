@@ -8,6 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
+from agent_sdlc.adapters.errors import ForgeError
 from agent_sdlc.agents.roles import (
     IMPLEMENTER,
     PLANNER,
@@ -357,16 +360,25 @@ class StageExecutor:
         ref = self._forge.item_ref(wi.id)
         body = pr_body(item, wi, ref, self._decisions_for(item.id), item.data.get("checks", []),
                        str(item.data.get("review_notes", "")))
+        events: list[EventInput] = []
         if item.pr_id:
             self._forge.update_pr(item.pr_id, body, wi.id)
             pr_id = item.pr_id
         else:
             pr_id = self._forge.create_pr(item.branch, pr_title(wi, ref), body, wi.id)
             if pr_id:  # dry-run returns 0: there is no PR to point at (M6)
-                self._forge.comment_item(
-                    wi.id, plan_comment_html(str(item.data.get("plan", "")),
-                                             self._forge.pr_ref(pr_id)))
-        return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id)
+                events += self._comment_plan(wi.id, str(item.data.get("plan", "")), pr_id)
+        return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id, events=events)
+
+    def _comment_plan(self, wi_id: int, plan: str, pr_id: int) -> list[EventInput]:
+        """Best effort: once the PR exists, its id must be stored, so a failed comment must not
+        fail the step and make a retry open a second PR (R2). The PR body carries the plan."""
+        try:
+            self._forge.comment_item(wi_id, plan_comment_html(plan, self._forge.pr_ref(pr_id)))
+        except (httpx.HTTPError, ForgeError, OSError) as e:
+            log.warning("plan comment failed for PR %s: %s", pr_id, e)
+            return [EventInput("plan_comment_failed", {"pr_id": pr_id, "error": str(e)[:500]})]
+        return []
 
     async def _awaiting(self, item: Item) -> StepResult:
         assert item.pr_id is not None

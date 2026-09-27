@@ -15,7 +15,7 @@ from typing import Any, cast
 
 from agent_sdlc.agents.roles import Role
 from agent_sdlc.agents.transcript import TranscriptWriter
-from agent_sdlc.policy import CommandPolicy, PathPolicy, _relative, categorize
+from agent_sdlc.policy import CommandPolicy, PathPolicy, _relative, categorize, is_read_only
 from agent_sdlc.types import (
     ESCALATE_CATEGORIES,
     AgentInfraError,
@@ -48,6 +48,9 @@ SANDBOX: dict[str, Any] = {
     "network": {"allowedDomains": [], "allowUnixSockets": [], "allowAllUnixSockets": False,
                 "allowLocalBinding": False},
 }
+
+# Characters the shell passes through literally in an argument (R3).
+_PLAIN_ARG = re.compile(r"[A-Za-z0-9_./:@%+,-]+")
 
 log = logging.getLogger(__name__)
 # After an escalation interrupt, wait this long for the SDK's final ResultMessage (spec §5.3).
@@ -163,6 +166,7 @@ def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> st
         argv = shlex.split(command)
     except ValueError:
         return None
+    read_only = is_read_only(argv)
     for token in argv[1:]:
         candidate = token
         if candidate.startswith("-"):
@@ -173,9 +177,19 @@ def _bash_path_violation(command: str, cwd: Path, path_policy: PathPolicy) -> st
             continue
         if candidate.startswith("~"):
             return f"path is outside the worktree: {token}"
-        if path_policy.check_read(candidate, cwd) is not None:
+        if path_policy.check_read(candidate, cwd) is not None and not (
+                read_only and _not_a_path(candidate)):
             return f"path is outside the worktree: {token}"
     return None
+
+
+def _not_a_path(token: str) -> bool:
+    """An absolute-looking read-only command argument such as the grep pattern "/api/users"
+    (R3): nothing exists there, so the command cannot read it, and plain characters only, so the
+    shell cannot expand it (glob, brace, tilde or zsh qualifier) into a path that does exist.
+    Relative escapes (../x) stay denied."""
+    return (token.startswith("/") and _PLAIN_ARG.fullmatch(token) is not None
+            and not os.path.lexists(token))
 
 
 def agent_env(config_dir: Path, auth_env: dict[str, str],
