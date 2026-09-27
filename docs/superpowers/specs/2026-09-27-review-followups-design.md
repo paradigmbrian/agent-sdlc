@@ -121,15 +121,36 @@ At the start of `_implement`, when `item.pr_id` is set, before the manifest gate
 3. HEAD is an ancestor of the remote tip: `git merge --ff-only FETCH_HEAD`.
 4. Otherwise: `git merge --no-edit FETCH_HEAD` with the agent identity.
 5. Merge conflict: `git merge --abort`; park `needs_human` with note
-   `PR branch has diverged and could not be merged: <conflicted files>`. After the human
-   resolves it, a requeue returns to implement (`needs_human` from implement has no gate to
-   approve, so `requeue` falls back to the parked stage and adds no approval labels).
+   `PR branch has diverged and could not be merged: <conflicted files>. The conflict is with the
+   agent's unpushed commits in <worktree path>; resolve it there (or discard those commits), then
+   remove the parked tag.` The conflict is between the remote PR branch and the agent's own
+   *unpushed* local commits, which a human cannot see on the remote branch itself, so the note
+   points at the worktree that holds them instead of asking the human to resolve it on the PR
+   branch. After the human resolves it, a requeue returns to implement (`needs_human` from
+   implement has no gate to approve, so `requeue` falls back to the parked stage and adds no
+   approval labels).
 
 New `Workspaces.incorporate_remote(wt, branch) -> list[str]` returns the paths the human commits
 changed (`git diff --name-only <old HEAD> <new HEAD>`, empty when nothing was merged) and raises
-`MergeConflict(files)` on step 5. New `Workspaces.human_blobs(wt) -> dict[str, str]` computes
+`MergeConflict(files)` on step 5. Before the branch fetch (step 1), and still inside the existing
+`_base_lock`, it also refreshes the shared base repo's remote refs with the same authenticated
+`fetch --prune origin` that `_ensure_base` runs, executed in the base repo rather than the
+worktree: during PR rounds, `origin/<base>` is otherwise only refreshed when a worktree is first
+created, so once a human merges base into the PR branch ("Update branch" on GitHub, or the ADO
+equivalent), upstream commits from other (agent-authored) PRs that landed on base meanwhile would
+otherwise be counted as this agent's own changes against a stale `origin/<base>` — spurious
+manifest/policy parks, inflated diffs. New `Workspaces.human_blobs(wt) -> dict[str, str]` computes
 `data["human_blobs"]` as described below; it returns `{}` when nothing has been fetched yet (no
 `incorporate_remote` call, or the remote branch doesn't exist).
+
+**PR_OPEN also incorporates.** A human can push to the PR branch at any point during
+implement/verify/review, not only while the item is back in implement for a revision round. If
+`_pr_open` pushed HEAD as-is, that push would be a non-fast-forward and fail. So `_pr_open`, when
+`item.pr_id` is set and before its own pre-push policy/manifest checks, records `before =
+Workspaces.head(wt)` and runs the same incorporate step (the conflict park above applies here
+too, unchanged). If HEAD moved, `_pr_open` does not push: it returns a `StepResult` back to
+`Stage.VERIFY` (with `data["human_blobs"]` when it changed) so checks re-run on the merged tree
+before the branch is next pushed. Otherwise it proceeds to push exactly as before.
 
 **Human-changed paths.** Policy, the manifest gate and the diff-size limit all check the whole
 diff against base, so a human's own edit to a protected path, a manifest, or just a large edit
