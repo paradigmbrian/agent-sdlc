@@ -51,9 +51,10 @@ Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md` plus
   `auth`, `laya`, daily turn/token caps, `max_concurrent_sessions`, `run_window`.
 - `targets/<name>.yaml` holds one repository: `forge` (`kind: ado` or `kind: github`),
   `intake` labels, `repo` (base branch, branch prefix, install list, verify commands), `policy`
-  and per-item `limits`. `limits.max_agent_errors` (default 3) caps failed agent sessions per
-  stage before it parks `agent_error`; it is separate from `limits.max_verify_retries`, which
-  caps the implement ↔ verify/review loop (red checks, blocking reviews).
+  and per-item `limits`. After a failed agent session, the stage is retried up to
+  `limits.max_agent_errors` times (default 3) before it parks `agent_error`; this is separate
+  from `limits.max_verify_retries`, which caps the implement ↔ verify/review loop (red checks,
+  blocking reviews).
 - `--config <file>` picks another global config; `--target <file>` runs a single target with
   default global settings.
 - State lives in `~/.agent-sdlc/agent-sdlc-v2.db`. Items are referenced as `<target>#<id>`
