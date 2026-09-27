@@ -112,7 +112,9 @@ and discarded at the end, and the tracker (ADO/GitHub) is read but never written
 labels, pushes, PRs or replies. Traces are still kept, under
 `~/.agent-sdlc/dry-run/<timestamp>/traces` by default. Laya and Claude run for real against this
 copy, so a dry run still costs real tokens; those tokens are recorded only in the temp DB and are
-not counted against the real daily caps.
+not counted against the real daily caps. Items already past planning are previewed from a fresh
+worktree of the base branch, without the unpushed commits of earlier rounds, so the verify/review
+preview of those items is not representative.
 
 ### Traces and logs
 
