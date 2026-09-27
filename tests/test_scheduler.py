@@ -1,4 +1,6 @@
 import logging
+import threading
+import time as time_module
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
@@ -353,17 +355,120 @@ async def test_i1_any_executor_error_backs_off_then_parks_infra(
     assert type(err).__name__ in item.data["park_note"]
 
 
-async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: ignore[no-untyped-def]
-    store, ado, ws, target = env
-    two = target.model_copy(update={"limits": target.limits.model_copy(
-        update={"max_concurrent_items": 2})})
+class GatedExecutor:
+    """Per-item results; an item with a gate blocks until the gate is set (spec §1 tests)."""
+
+    def __init__(self, results: dict[int, StepResult | Exception],
+                gates: dict[int, threading.Event] | None = None,
+                barrier: threading.Barrier | None = None) -> None:
+        self.results, self.gates, self.barrier = results, gates or {}, barrier
+        self.seen: set[int] = set()
+
+    async def run(self, item: Item) -> StepResult:
+        self.seen.add(item.external_id)
+        if self.barrier is not None:
+            self.barrier.wait(5)             # every item must be running at the same time
+        gate = self.gates.get(item.external_id)
+        if gate is not None:
+            assert gate.wait(5)
+        r = self.results[item.external_id]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def _limit(target: TargetConfig, n: int) -> TargetConfig:
+    return target.model_copy(update={"limits": target.limits.model_copy(
+        update={"max_concurrent_items": n})})
+
+
+def _two_implementing(store: Store) -> None:
     for i in (5, 6):
         store.add_item("fixture", replace(WI, id=i), f"agent/{i}-x")
         store.save(replace(_it(store, i), stage=Stage.IMPLEMENT))
-    ex = ScriptedExecutor(RuntimeError("boom"), StepResult(Transition(Stage.VERIFY)))
-    await Scheduler(target=two, store=store, executor=ex, forge=ado, workspaces=ws,
-                    clock=lambda: NOW).tick()
-    assert [i.external_id for i in ex.seen] == [5, 6]
+
+
+def _drain(s: Scheduler) -> None:
+    for th in list(s._running.values()):  # noqa: SLF001 - joining the item threads
+        th.join(5)
+
+
+def _until(pred, timeout: float = 5.0) -> None:  # type: ignore[no-untyped-def]
+    """Poll `pred` every 10ms until true, up to `timeout`s (controller ruling: `tick(wait=False)`
+    returns before the launched item thread has necessarily entered the executor)."""
+    deadline = time_module.monotonic() + timeout
+    while not pred():
+        assert time_module.monotonic() < deadline, "timed out waiting for condition"
+        time_module.sleep(0.01)
+
+
+async def test_items_run_concurrently(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, ws, target = env
+    _two_implementing(store)
+    ex = GatedExecutor({5: StepResult(Transition(Stage.VERIFY)),
+                        6: StepResult(Transition(Stage.VERIFY))}, barrier=threading.Barrier(2))
+    await Scheduler(target=_limit(target, 2), store=store, executor=ex, forge=ado,
+                    workspaces=ws, clock=lambda: NOW).tick()
+    assert _it(store, 5).stage is Stage.VERIFY and _it(store, 6).stage is Stage.VERIFY
+
+
+async def test_limit_holds_and_freed_slot_is_refilled(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, ws, target = env
+    _two_implementing(store)
+    gate = threading.Event()
+    ex = GatedExecutor({5: StepResult(Transition(Stage.VERIFY)),
+                        6: StepResult(Transition(Stage.VERIFY))}, gates={5: gate})
+    s = Scheduler(target=_limit(target, 1), store=store, executor=ex, forge=ado,
+                  workspaces=ws, clock=lambda: NOW)
+    await s.tick(wait=False)
+    _until(lambda: 5 in ex.seen)  # controller ruling: wait for the executor to actually start
+    await s.tick(wait=False)                  # 5 still running: 6 must not start
+    assert ex.seen == {5}
+    assert set(store.flags("busy:fixture:")) == {"busy:fixture:5"}
+    assert (store.get_flag("busy:fixture:5") or "").startswith("implement|")
+    gate.set()
+    _drain(s)
+    assert store.flags("busy:fixture:") == {}
+    await s.tick()
+    assert ex.seen == {5, 6} and _it(store, 6).stage is Stage.VERIFY
+
+
+async def test_run_forever_clears_stale_busy_flags(env) -> None:  # type: ignore[no-untyped-def]
+    store = env[0]
+    store.set_flag("busy:fixture:9", "implement|2026-09-01T00:00:00+00:00")
+    store.set_flag("busy:other:9", "implement|2026-09-01T00:00:00+00:00")
+    stop = threading.Event()
+    stop.set()
+    await sched(env, GatedExecutor({})).run_forever(1, stop)
+    assert store.get_flag("busy:fixture:9") is None
+    assert store.get_flag("busy:other:9") is not None
+
+
+async def test_requeue_scan_skips_a_running_item(env) -> None:  # type: ignore[no-untyped-def]
+    """Review focus 1: a running item that parked must not get park side effects twice."""
+    store, ado, ws, target = env
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    store.save(replace(_it(store), stage=Stage.IMPLEMENT))
+    gate = threading.Event()
+    ex = GatedExecutor({5: StepResult(Transition(Stage.VERIFY))}, gates={5: gate})
+    s = sched(env, ex)
+    await s.tick(wait=False)
+    _until(lambda: 5 in ex.seen)  # controller ruling: wait for the executor to actually start
+    store.save(replace(_it(store), stage=Stage.PARKED, park_reason=ParkReason.RED,
+                       parked_from=Stage.VERIFY))   # as if the item thread just parked
+    await s.tick(wait=False)
+    assert ado.wi_comments == [] and "agent:parked" not in ado.tags[5]
+    gate.set()
+    _drain(s)
+
+
+async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: ignore[no-untyped-def]
+    store, ado, ws, target = env
+    _two_implementing(store)
+    ex = GatedExecutor({5: RuntimeError("boom"), 6: StepResult(Transition(Stage.VERIFY))})
+    await Scheduler(target=_limit(target, 2), store=store, executor=ex, forge=ado,
+                    workspaces=ws, clock=lambda: NOW).tick()
+    assert ex.seen == {5, 6}
     assert _it(store).infra_failures == 1 and _it(store, 6).stage is Stage.VERIFY
 
 
@@ -521,12 +626,12 @@ async def test_i5_busy_flag_set_during_step_and_cleared_after(  # type: ignore[n
 
     class Spy:
         async def run(self, item: Item) -> StepResult:
-            seen.append(store.get_flag("busy:fixture"))
+            seen.append(store.get_flag("busy:fixture:5"))
             return StepResult(Transition(Stage.PLAN))
 
     await sched(env, Spy()).tick()
-    assert seen == [f"5|triage|{NOW.isoformat()}"]
-    assert store.get_flag("busy:fixture") is None
+    assert seen == [f"triage|{NOW.isoformat()}"]
+    assert store.get_flag("busy:fixture:5") is None
 
 
 # --- follow-up fix wave: F4 queued items are not stale, F6 kill switch counts tokens ---

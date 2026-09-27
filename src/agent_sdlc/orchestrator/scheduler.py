@@ -87,13 +87,22 @@ class Scheduler:
         self._ws = workspaces
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._limits = limits or GlobalLimits()
+        self._running: dict[int, threading.Thread] = {}   # item id -> step thread (spec §1)
+        self._run_lock = threading.Lock()
+        # Launch order bookkeeping: `Store.items` orders by (created_at, id), which never
+        # changes, so without this the item that just freed a slot would win it right back
+        # forever instead of yielding to an item that has been waiting (fix for the brief's
+        # own test_limit_holds_and_freed_slot_is_refilled).
+        self._launch_seq = 0
+        self._last_launched: dict[int, int] = {}
 
     # loop ------------------------------------------------------------------
     async def run_forever(self, poll_s: int = 60,
                           stop: threading.Event | None = None) -> None:
+        self._clear_busy()
         while stop is None or not stop.is_set():
             try:
-                await self.tick()
+                await self.tick(wait=False)
             except Exception:
                 log.exception("tick failed")
             if stop is None:
@@ -114,7 +123,20 @@ class Scheduler:
         used = self._store.daily_usage(now.date())
         return used.turns < lim.max_daily_agent_turns and used.tokens < lim.max_daily_tokens
 
-    async def tick(self) -> None:
+    def _busy_key(self, item: Item) -> str:
+        return f"busy:{self._t.name}:{item.external_id}"
+
+    def _clear_busy(self) -> None:
+        """Busy flags left by a process that died mid-step (spec §1). Only the long-running
+        loop does this: `requeue` builds a Scheduler too and must not wipe live flags."""
+        for key in self._store.flags(f"busy:{self._t.name}:"):
+            self._store.set_flag(key, None)
+
+    def _is_running(self, item_id: int) -> bool:
+        with self._run_lock:
+            return item_id in self._running
+
+    async def tick(self, wait: bool = True) -> None:
         now = self._clock()
         self._store.set_flag(f"last_tick:{self._t.name}", now.isoformat())
         if self._paused(now):
@@ -123,15 +145,50 @@ class Scheduler:
         self._requeue_untagged()
         self._warn_stale(now)
         for item in self._store.items(self._t.name, [Stage.AWAITING_HUMAN]):
-            await self._step(item, now)
+            if not self._is_running(item.id):
+                await self._step(item, now)
         if not self._agent_work_allowed(now):
             return
-        active = in_flight(self._store.items(self._t.name, ACTIVE_STAGES),
-                           self._t.limits.max_concurrent_items)
-        for item in active:
+        launched: list[threading.Thread] = []
+        for item in self._to_launch():
             if self._paused(self._clock()):
-                return
-            await self._step(item, now)
+                break
+            launched.append(self._launch(item, now))
+        if wait:
+            for th in launched:
+                await asyncio.to_thread(th.join)
+
+    def _to_launch(self) -> list[Item]:
+        """In-flight items not already running, up to the free slots. Running items are left
+        out before the limit applies, so a requeued item that sorts ahead can't exceed it."""
+        active = self._store.items(self._t.name, ACTIVE_STAGES)
+        with self._run_lock:
+            running = set(self._running)
+        free = self._t.limits.max_concurrent_items - len(running)
+        waiting = [i for i in active if i.id not in running]
+        # Least-recently-launched first (never-launched items sort first), then re-sorted by
+        # in_flight's stable TRIAGE-last rule so that preference is unaffected.
+        waiting.sort(key=lambda i: self._last_launched.get(i.id, -1))
+        return in_flight(waiting, max(free, 0))
+
+    def _launch(self, item: Item, now: datetime) -> threading.Thread:
+        """One daemon thread with its own event loop per item step (spec §1)."""
+        def run() -> None:
+            try:
+                asyncio.run(self._step(item, now))
+            except Exception:
+                log.exception("step thread failed for %s", _ref(item))
+            finally:
+                with self._run_lock:
+                    self._running.pop(item.id, None)
+
+        th = threading.Thread(target=run, name=f"item-{_ref(item)}", daemon=True)
+        with self._run_lock:
+            self._running[item.id] = th
+            self._last_launched[item.id] = self._launch_seq
+            self._launch_seq += 1
+        th.start()
+        return th
 
     def _warn_stale(self, now: datetime) -> None:
         limit = timedelta(minutes=self._t.limits.stale_after_minutes)
@@ -161,6 +218,8 @@ class Scheduler:
 
     def _requeue_untagged(self) -> None:
         for item in self._store.items(self._t.name, [Stage.PARKED]):
+            if self._is_running(item.id):
+                continue   # its own thread is still committing and running side effects
             if not item.data.get("parked_tag_set"):
                 # The park tag was never confirmed set, so a missing tag is not a human
                 # approval: retry the park side effects instead (C1).
@@ -206,14 +265,14 @@ class Scheduler:
 
     # one step --------------------------------------------------------------
     async def _step(self, item: Item, now: datetime) -> None:
-        # Lets `status` tell a long step from a dead loop (I5).
-        self._store.set_flag(f"busy:{self._t.name}",
-                             f"{item.external_id}|{item.stage.value}|{now.isoformat()}")
+        # Lets `status` show every running item and tell a long step from a dead loop (I5).
+        key = self._busy_key(item)
+        self._store.set_flag(key, f"{item.stage.value}|{now.isoformat()}")
         try:
             with log_context(_ref(item), item.stage.value):
                 await self._run_step(item, now)
         finally:
-            self._store.set_flag(f"busy:{self._t.name}", None)
+            self._store.set_flag(key, None)
 
     async def _run_step(self, item: Item, now: datetime) -> None:
         retry_after = item.data.get("retry_after")

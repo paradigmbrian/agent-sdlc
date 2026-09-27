@@ -137,20 +137,14 @@ def _target_status(target: TargetConfig, store: Store, now: datetime) -> None:
         age = now - datetime.fromisoformat(tick)
         poll = int(store.get_flag("poll_s") or 60)
         warn = "  LOOP NOT RUNNING?" if age > timedelta(seconds=3 * poll) else ""
-        busy = store.get_flag(f"busy:{target.name}")
-        busy_line = ""
-        if busy:
-            # A long step blocks the loop, so an old tick is expected while it runs (I5).
-            item_id, stage, since = busy.split("|", 2)
-            busy_age = now - datetime.fromisoformat(since)
-            busy_line = f"busy: {target.name}#{item_id} {stage} for {_ago(busy_age)}"
-            if busy_age > timedelta(minutes=target.limits.stale_after_minutes):
-                busy_line += "  STUCK?"
-            else:
-                warn = ""
         print(f"last tick: {_ago(age)} ago{warn}")
-        if busy_line:
-            print(busy_line)
+    stuck_after = timedelta(minutes=target.limits.stale_after_minutes)
+    for key, value in sorted(store.flags(f"busy:{target.name}:").items()):
+        stage, since = value.split("|", 1)
+        busy_age = now - datetime.fromisoformat(since)
+        stuck = "  STUCK?" if busy_age > stuck_after else ""
+        print(f"busy: {target.name}#{key.rsplit(':', 1)[1]} {stage} for "
+              f"{_ago(busy_age)}{stuck}")
     stale_after = timedelta(minutes=target.limits.stale_after_minutes)
     busy_ids = {i.id for i in in_flight(store.items(target.name, ACTIVE_STAGES),
                                         target.limits.max_concurrent_items)}
