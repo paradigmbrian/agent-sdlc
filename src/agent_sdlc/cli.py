@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from agent_sdlc.config import GlobalConfig, Loaded, load_config, load_single
 from agent_sdlc.decisions.gates import GATES
+from agent_sdlc.fsutil import ensure_private_dir
 from agent_sdlc.labeling import calibrate_question, label_logged, label_triage
 from agent_sdlc.logctx import configure_logging
 from agent_sdlc.metrics import render_metrics
@@ -16,7 +18,7 @@ from agent_sdlc.orchestrator.slots import SessionSlots
 from agent_sdlc.orchestrator.supervisor import Supervisor
 from agent_sdlc.orchestrator.transitions import requeue
 from agent_sdlc.ports import DeciderPort
-from agent_sdlc.store import Store
+from agent_sdlc.store import Store, snapshot_sqlite
 from agent_sdlc.targets import TargetConfig
 from agent_sdlc.tracing import render_trace
 from agent_sdlc.types import ACTIVE_STAGES, EventInput, Item
@@ -41,7 +43,8 @@ def _parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run")
     run.add_argument("--once", action="store_true")
-    run.add_argument("--dry-run-push", action="store_true")
+    run.add_argument("--dry-run", "--dry-run-push", dest="dry_run", action="store_true",
+                     help="isolated preview: snapshot DB, temp workspaces, no tracker writes")
     run.add_argument("--poll", type=int, default=60)
     pa = sub.add_parser("pause")
     pa.add_argument("--target-name")
@@ -87,10 +90,10 @@ def _decider(cfg: GlobalConfig, store: Store) -> DeciderPort:
 
 
 def _scheduler(loaded: Loaded, target: TargetConfig, store: Store, args: argparse.Namespace,
-              decider: DeciderPort, slots: SessionSlots, dry_run_push: bool) -> Scheduler:
+              decider: DeciderPort, slots: SessionSlots, dry_run: bool) -> Scheduler:
     return build_scheduler(target, cfg=loaded.config, store=store, decider=decider, slots=slots,
                            workspaces=Path(args.workspaces), traces=Path(args.traces),
-                           dry_run_push=dry_run_push, auth_env=claude_auth_env(loaded.config))
+                           dry_run=dry_run, auth_env=claude_auth_env(loaded.config))
 
 
 def resolve_ref(store: Store, names: list[str], ref: str) -> Item:
@@ -179,6 +182,33 @@ def _status(loaded: Loaded, store: Store, name: str | None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.cmd == "run" and args.dry_run:
+        return _dry_run(args)
+    return _main(args)
+
+
+def _dry_run(args: argparse.Namespace) -> int:
+    """Run one tick against a snapshot DB and temp workspaces with a write-free forge; keep
+    only the traces (spec §2)."""
+    if not args.once:
+        print("--dry-run needs --once")
+        return 1
+    if not args.db.startswith("sqlite:///"):
+        print("--dry-run needs a SQLite --db (sqlite:///path)")
+        return 1
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    kept = Path(args.traces).expanduser().parent / "dry-run" / stamp / "traces"
+    ensure_private_dir(kept)
+    with tempfile.TemporaryDirectory(prefix="agent-sdlc-dry-run-") as tmp:
+        args.db = snapshot_sqlite(args.db, Path(tmp) / "state.db")
+        args.workspaces = str(Path(tmp) / "workspaces")
+        args.traces = str(kept)
+        rc = _main(args)
+    print(f"dry run: traces kept in {kept}")
+    return rc
+
+
+def _main(args: argparse.Namespace) -> int:
     configure_logging(Path(args.logs))
     loaded: Loaded | None
     try:
@@ -247,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             target = loaded.target(item.target)
             sched = _scheduler(loaded, target, store, args, _decider(loaded.config, store),
-                               SessionSlots(1), dry_run_push=False)
+                               SessionSlots(1), dry_run=False)
             sched.requeue_item(item.id)
     elif args.cmd == "calibrate":
         gates = [args.gate] if args.gate else sorted(GATES)
@@ -264,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"choose a target with --target-name ({', '.join(names)})")
                 return 1
             target = loaded.target(args.target_name or names[0])
-            forge = make_forge(target, dry_run_push=True)
+            forge = make_forge(target, dry_run=True)
             n = label_triage(forge, _decider(loaded.config, store), store, args.limit, input,
                              target=target.name)
         else:
@@ -281,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
         decider = _decider(loaded.config, store)
         slots = SessionSlots(loaded.config.limits.max_concurrent_sessions)
         sup = Supervisor(loaded.targets, lambda t: _scheduler(
-            loaded, t, store, args, decider, slots, args.dry_run_push))
+            loaded, t, store, args, decider, slots, args.dry_run))
         if args.once:
             return 0 if sup.run_once() else 1
         sup.run_forever(args.poll)

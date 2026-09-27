@@ -198,18 +198,6 @@ def test_comment_pr_posts_new_thread(client: AdoForge) -> None:
         "comments": [{"content": "hello", "commentType": 1}], "status": 4}
 
 
-@respx.mock
-def test_dry_run_pr_methods_make_no_http_calls() -> None:
-    client = AdoForge(CFG, "pat", http=httpx.Client(base_url=BASE, auth=("", "pat")),
-                       dry_run_push=True)
-    client.comment_pr(0, "x")
-    client.reply_pr(0, PrComment(1, 1, "a", "c"), "x")
-    client.delete_branch("agent/5-x")
-    assert client.pr_status(0) == "active"
-    assert client.pr_comments(0) == []
-    assert respx.calls.call_count == 0
-
-
 def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
                                      origin_repo: Path) -> None:
     ws = Workspaces(tmp_path / "w", target)
@@ -221,17 +209,6 @@ def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,
     assert "agent/5-x" in git("branch", "--list", "agent/*", cwd=origin_repo)
     with pytest.raises(ForgeError):
         client.push_branch(wt, "dev")
-
-
-def test_push_branch_dry_run_does_nothing(tmp_path: Path, target: TargetConfig,
-                                          origin_repo: Path) -> None:
-    ws = Workspaces(tmp_path / "w", target)
-    wt = ws.create(5, "agent/5-x")
-    client = AdoForge(CFG, "pat", http=httpx.Client(), push_url=str(origin_repo),
-                       dry_run_push=True)
-    client.push_branch(wt, "agent/5-x")
-    assert git("branch", "--list", "agent/*", cwd=origin_repo) == ""
-    assert client.create_pr("agent/5-x", "t", "b", 5) == 0
 
 
 def test_ado_forge_port_attributes() -> None:

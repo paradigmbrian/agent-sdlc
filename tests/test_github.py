@@ -36,11 +36,10 @@ class FakeAuth:
         return "agent-sdlc-bot[bot]"
 
 
-def forge(dry_run: bool = False, auth: FakeAuth | None = None,
-          push_url: str | None = None) -> GitHubForge:
+def forge(auth: FakeAuth | None = None, push_url: str | None = None) -> GitHubForge:
     return GitHubForge(CFG, auth or FakeAuth(), intake=IntakeConfig(), base_branch="main",
                        branch_prefix="agent/", http=httpx.Client(base_url=API),
-                       push_url=push_url, dry_run_push=dry_run)
+                       push_url=push_url)
 
 
 def issue(n: int, body: str | None = "Do it", labels: tuple[str, ...] = ("agent",),
@@ -127,7 +126,7 @@ def test_labels_add_remove_encoded_and_has() -> None:
 @respx.mock
 def test_comment_item_posts_html() -> None:
     route = respx.post(f"{REPO}/issues/5/comments").mock(return_value=httpx.Response(201))
-    forge(dry_run=True).comment_item(5, "<p>hi</p>")   # issue comments stay real in dry run
+    forge().comment_item(5, "<p>hi</p>")
     assert route.calls[0].request.content == b'{"body":"<p>hi</p>"}'
 
 
@@ -289,18 +288,6 @@ def test_delete_branch_tolerates_missing_and_refuses_other_refs() -> None:
     assert route.call_count == 1
     with pytest.raises(ForgeError):
         f.delete_branch("main")
-
-
-@respx.mock
-def test_dry_run_makes_pr_side_effects_no_ops() -> None:
-    f = forge(dry_run=True)
-    assert f.create_pr("agent/5-x", "t", "b", 5) == 0
-    f.update_pr(0, "b", 5)
-    f.comment_pr(0, "x")
-    f.reply_pr(0, PrComment(0, 1, "a", "c", kind="conversation"), "x")
-    f.delete_branch("agent/5-x")
-    assert f.pr_status(0) == "active" and f.pr_comments(0) == []
-    assert respx.calls.call_count == 0
 
 
 def test_push_branch_to_local_origin(tmp_path: Path, target: TargetConfig,

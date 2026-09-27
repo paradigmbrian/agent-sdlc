@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 
 from agent_sdlc.adapters.ado import AdoForge
+from agent_sdlc.adapters.dry_run import DryRunForge
 from agent_sdlc.adapters.github import GitHubForge
 from agent_sdlc.adapters.github_auth import GitHubAppAuth
 from agent_sdlc.agents.runner import ClaudeAgentRunner
@@ -23,13 +24,17 @@ from agent_sdlc.workspaces import Workspaces
 Secret = Callable[[str, str], str]
 
 
-def make_forge(target: TargetConfig, *, dry_run_push: bool,
+def make_forge(target: TargetConfig, *, dry_run: bool,
                secret: Secret = get_secret) -> ForgePort:
+    forge = _real_forge(target, secret)
+    return DryRunForge(forge) if dry_run else forge   # writes skipped in a dry run (spec §2)
+
+
+def _real_forge(target: TargetConfig, secret: Secret) -> ForgePort:
     f, repo = target.forge, target.repo
     if isinstance(f, AdoForgeConfig):
         return AdoForge(f, secret(f.pat_secret, "AGENT_SDLC_ADO_PAT"), intake=target.intake,
-                        base_branch=repo.base_branch, branch_prefix=repo.branch_prefix,
-                        dry_run_push=dry_run_push)
+                        base_branch=repo.base_branch, branch_prefix=repo.branch_prefix)
     if f.app_id is None:
         raise ValueError(f"set forge.app_id for target {target.name} (spec §7)")
     http = httpx.Client(base_url=f.api_url, timeout=30)
@@ -37,7 +42,7 @@ def make_forge(target: TargetConfig, *, dry_run_push: bool,
                          owner=f.owner, repo=f.repo, http=http,
                          installation_id=f.installation_id)
     return GitHubForge(f, auth, intake=target.intake, base_branch=repo.base_branch,
-                       branch_prefix=repo.branch_prefix, http=http, dry_run_push=dry_run_push)
+                       branch_prefix=repo.branch_prefix, http=http)
 
 
 def claude_auth_env(cfg: GlobalConfig, secret: Secret = get_secret) -> dict[str, str]:
@@ -48,9 +53,9 @@ def claude_auth_env(cfg: GlobalConfig, secret: Secret = get_secret) -> dict[str,
 
 def build_scheduler(target: TargetConfig, *, cfg: GlobalConfig, store: Store,
                     decider: DeciderPort, slots: SessionSlots, workspaces: Path,
-                    traces: Path | None, dry_run_push: bool, auth_env: dict[str, str],
+                    traces: Path | None, dry_run: bool, auth_env: dict[str, str],
                     forge: ForgePort | None = None) -> Scheduler:
-    forge = forge or make_forge(target, dry_run_push=dry_run_push)
+    forge = forge or make_forge(target, dry_run=dry_run)
     ws = Workspaces(workspaces.resolve(), target, git_auth=forge.git_auth_header)
     pp = PathPolicy(target.policy.protected_paths)
     cp = CommandPolicy([*target.repo.install, *target.repo.commands.values()])

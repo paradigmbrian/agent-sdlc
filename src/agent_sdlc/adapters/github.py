@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import logging
 import re
 import subprocess
 from pathlib import Path
@@ -16,7 +15,6 @@ from agent_sdlc.targets import GitHubForgeConfig, IntakeConfig
 from agent_sdlc.types import PrComment, WorkItem
 from agent_sdlc.workspaces import git_env
 
-log = logging.getLogger(__name__)
 _PER_PAGE = 100
 _MAX_PAGES = 50
 _AC_HEADING = re.compile(r"^(#{1,6})[ \t]*acceptance criteria[ \t]*:?[ \t]*$",
@@ -48,7 +46,7 @@ class GitHubForge:
 
     def __init__(self, cfg: GitHubForgeConfig, auth: AppAuth, *, intake: IntakeConfig,
                  base_branch: str, branch_prefix: str, http: httpx.Client,
-                 push_url: str | None = None, dry_run_push: bool = False) -> None:
+                 push_url: str | None = None) -> None:
         self._cfg = cfg
         self._auth = auth
         self._intake = intake
@@ -56,7 +54,6 @@ class GitHubForge:
         self._branch_prefix = branch_prefix
         self._http = http
         self._push_url = push_url or cfg.clone_url
-        self._dry_run = dry_run_push
         self._repo = f"/repos/{cfg.owner}/{cfg.repo}"
 
     # plumbing --------------------------------------------------------------
@@ -171,9 +168,6 @@ class GitHubForge:
     # git & pull requests ---------------------------------------------------
     def push_branch(self, worktree: Path, branch: str) -> None:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would push %s", branch)
-            return
         # M-8: fetch the token exactly once so the header we push with and the string we
         # redact on failure can never diverge (a second token() call could return a new one).
         token = self._auth.token()
@@ -190,32 +184,22 @@ class GitHubForge:
 
     def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would open PR %s\n%s", title, body)
-            return 0
         res = self._req("POST", f"{self._repo}/pulls", json={
             "title": title, "head": branch, "base": self._base_branch,
             "body": self._closes(body, item_id)})
         return int(res["number"])
 
     def update_pr(self, pr_id: int, body: str, item_id: int) -> None:
-        if self._dry_run:
-            log.info("dry-run: would update PR %s description", pr_id)
-            return
         self._req("PATCH", f"{self._repo}/pulls/{pr_id}",
                   json={"body": self._closes(body, item_id)})
 
     def pr_status(self, pr_id: int) -> str:
-        if self._dry_run:
-            return "active"
         pr = self._req("GET", f"{self._repo}/pulls/{pr_id}")
         if pr.get("merged"):
             return "completed"
         return "abandoned" if pr.get("state") == "closed" else "active"
 
     def pr_comments(self, pr_id: int) -> list[PrComment]:
-        if self._dry_run:
-            return []
         me = self._auth.bot_login()
         out: list[PrComment] = []
         for c in self._pages(f"{self._repo}/issues/{pr_id}/comments"):
@@ -238,9 +222,6 @@ class GitHubForge:
         return out
 
     def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
-        if self._dry_run:
-            log.info("dry-run: would reply on PR %s: %s", pr_id, text)
-            return
         if comment.kind == "review_comment":
             self._req("POST",
                       f"{self._repo}/pulls/{pr_id}/comments/{comment.thread_id}/replies",
@@ -250,14 +231,8 @@ class GitHubForge:
         self.comment_pr(pr_id, f"{quoted}\n\n@{comment.author} {text}")
 
     def comment_pr(self, pr_id: int, text: str) -> None:
-        if self._dry_run:
-            log.info("dry-run: would comment on PR %s: %s", pr_id, text)
-            return
         self._req("POST", f"{self._repo}/issues/{pr_id}/comments", json={"body": text})
 
     def delete_branch(self, branch: str) -> None:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would delete branch %s", branch)
-            return
         self._req("DELETE", f"{self._repo}/git/refs/heads/{branch}", ok=(404, 422))

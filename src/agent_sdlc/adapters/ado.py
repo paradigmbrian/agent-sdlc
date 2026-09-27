@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import subprocess
 from html.parser import HTMLParser
 from pathlib import Path
@@ -14,7 +13,6 @@ from agent_sdlc.targets import AdoForgeConfig, IntakeConfig
 from agent_sdlc.types import PrComment, WorkItem
 from agent_sdlc.workspaces import git_env
 
-log = logging.getLogger(__name__)
 API = "7.1"
 _FIELDS = ("System.Id,System.Title,System.Description,Microsoft.VSTS.Common.AcceptanceCriteria,"
            "Microsoft.VSTS.TCM.ReproSteps,System.Tags,System.WorkItemType")
@@ -51,8 +49,7 @@ class AdoForge:
 
     def __init__(self, cfg: AdoForgeConfig, pat: str, *, intake: IntakeConfig | None = None,
                  base_branch: str = "dev", branch_prefix: str = "agent/",
-                 http: httpx.Client | None = None, push_url: str | None = None,
-                 dry_run_push: bool = False) -> None:
+                 http: httpx.Client | None = None, push_url: str | None = None) -> None:
         self._cfg = cfg
         self._intake = intake or IntakeConfig()
         self._base_branch = base_branch
@@ -61,7 +58,6 @@ class AdoForge:
                                           auth=("", pat), timeout=30)
         self._auth_header = basic_auth_header(pat)
         self._push_url = push_url or cfg.clone_url
-        self._dry_run = dry_run_push
         self._self_id: str | None = None
 
     # plumbing --------------------------------------------------------------
@@ -147,9 +143,6 @@ class AdoForge:
     # git & pull requests ---------------------------------------------------
     def push_branch(self, worktree: Path, branch: str) -> None:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would push %s", branch)
-            return
         r = subprocess.run(
             ["git", "-c", f"http.extraheader={self._auth_header}", "push", self._push_url,
              f"HEAD:refs/heads/{branch}"],
@@ -160,9 +153,6 @@ class AdoForge:
 
     def create_pr(self, branch: str, title: str, body: str, item_id: int) -> int:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would open PR %s\n%s", title, body)
-            return 0
         res = self._req("POST", f"{self._repo}/pullrequests", json={
             "sourceRefName": f"refs/heads/{branch}",
             "targetRefName": f"refs/heads/{self._base_branch}",
@@ -173,14 +163,9 @@ class AdoForge:
 
     def update_pr(self, pr_id: int, body: str, item_id: int) -> None:
         # item_id is unused: ADO links the work item through workItemRefs on create.
-        if self._dry_run:
-            log.info("dry-run: would update PR %s description", pr_id)
-            return
         self._req("PATCH", f"{self._repo}/pullrequests/{pr_id}", json={"description": body})
 
     def pr_status(self, pr_id: int) -> str:
-        if self._dry_run:
-            return "active"
         return str(self._req("GET", f"{self._repo}/pullrequests/{pr_id}")["status"])
 
     def _self_identity(self) -> str:
@@ -190,8 +175,6 @@ class AdoForge:
         return self._self_id
 
     def pr_comments(self, pr_id: int) -> list[PrComment]:
-        if self._dry_run:
-            return []
         me = self._self_identity()
         out: list[PrComment] = []
         for thread in self._req("GET", f"{self._repo}/pullRequests/{pr_id}/threads")["value"]:
@@ -207,27 +190,17 @@ class AdoForge:
         return out
 
     def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
-        if self._dry_run:
-            log.info("dry-run: would reply to PR %s thread %s: %s", pr_id, comment.thread_id,
-                     text)
-            return
         self._req("POST",
                   f"{self._repo}/pullRequests/{pr_id}/threads/{comment.thread_id}/comments",
                   json={"content": text, "parentCommentId": comment.comment_id,
                         "commentType": 1})
 
     def comment_pr(self, pr_id: int, text: str) -> None:
-        if self._dry_run:
-            log.info("dry-run: would comment on PR %s: %s", pr_id, text)
-            return
         self._req("POST", f"{self._repo}/pullRequests/{pr_id}/threads",
                   json={"comments": [{"content": text, "commentType": 1}], "status": 4})
 
     def delete_branch(self, branch: str) -> None:
         self._check_branch(branch)
-        if self._dry_run:
-            log.info("dry-run: would delete branch %s", branch)
-            return
         refs = self._req("GET", f"{self._repo}/refs", params={"filter": f"heads/{branch}"})
         match = [r for r in refs.get("value", []) if r["name"] == f"refs/heads/{branch}"]
         if not match:

@@ -24,14 +24,14 @@ def secrets(store: dict[str, str]):  # type: ignore[no-untyped-def]
 def test_make_forge_ado_uses_the_configured_pat_secret() -> None:
     t = TargetConfig.model_validate({**BASE, "name": "a", "forge": {
         "kind": "ado", "org": "o", "project": "p", "repo": "r", "pat_secret": "my-pat"}})
-    f = make_forge(t, dry_run_push=True, secret=secrets({"my-pat": "pat"}))
+    f = make_forge(t, dry_run=False, secret=secrets({"my-pat": "pat"}))
     assert isinstance(f, AdoForge) and f.kind == "ado"
 
 
 def test_make_forge_github_reads_the_app_key_lazily() -> None:
     t = TargetConfig.model_validate({**BASE, "name": "g", "forge": {
         "kind": "github", "owner": "o", "repo": "r", "app_id": 42}})
-    f = make_forge(t, dry_run_push=True,
+    f = make_forge(t, dry_run=False,
                    secret=secrets({"agent-sdlc-github-app-42": "-----BEGIN KEY-----"}))
     assert isinstance(f, GitHubForge)     # no network until a token is needed
 
@@ -40,7 +40,7 @@ def test_make_forge_github_without_app_id_explains() -> None:
     t = TargetConfig.model_validate({**BASE, "name": "g", "forge": {
         "kind": "github", "owner": "o", "repo": "r"}})
     with pytest.raises(ValueError, match="set forge.app_id for target g"):
-        make_forge(t, dry_run_push=True, secret=secrets({}))
+        make_forge(t, dry_run=False, secret=secrets({}))
 
 
 def test_i3_build_scheduler_wires_shared_slots_should_stop_and_forge_auth(tmp_path: Path) -> None:
@@ -53,7 +53,7 @@ def test_i3_build_scheduler_wires_shared_slots_should_stop_and_forge_auth(tmp_pa
     fake_forge.git_auth_header = lambda: "AUTH-FOR-T"  # type: ignore[method-assign]
     slots = SessionSlots(3)
     sched = build_scheduler(t, cfg=GlobalConfig(), store=store, decider=FakeDecider(),
-                            slots=slots, workspaces=tmp_path, traces=None, dry_run_push=True,
+                            slots=slots, workspaces=tmp_path, traces=None, dry_run=False,
                             auth_env={}, forge=fake_forge)
     executor = sched._executor  # noqa: SLF001 - inspecting private wiring is the point of I3
     runner = executor._runner  # noqa: SLF001
