@@ -289,6 +289,8 @@ class Workspaces:
         """Bring commits a human pushed to the PR branch into the worktree (spec §3.1).
         Returns the paths they changed. Raises MergeConflict (after aborting the merge) when
         the histories conflict, and GitError when the remote cannot be read."""
+        # Held for the fetch too: it opportunistically updates the shared remote-tracking ref
+        # refs/remotes/origin/<branch>, which races _ensure_base's `fetch --prune` (spec §1).
         with self._base_lock:
             r = self._run_git("fetch", "origin", f"refs/heads/{branch}", cwd=wt, auth=True)
         if r.returncode != 0:
