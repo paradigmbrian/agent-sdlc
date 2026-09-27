@@ -416,7 +416,7 @@ async def test_limit_holds_and_freed_slot_is_refilled(env) -> None:  # type: ign
     store, ado, ws, target = env
     _two_implementing(store)
     gate = threading.Event()
-    ex = GatedExecutor({5: StepResult(Transition(Stage.VERIFY)),
+    ex = GatedExecutor({5: StepResult(park(ParkReason.RED, "red")),
                         6: StepResult(Transition(Stage.VERIFY))}, gates={5: gate})
     s = Scheduler(target=_limit(target, 1), store=store, executor=ex, forge=ado,
                   workspaces=ws, clock=lambda: NOW)
@@ -431,6 +431,7 @@ async def test_limit_holds_and_freed_slot_is_refilled(env) -> None:  # type: ign
     assert store.flags("busy:fixture:") == {}
     await s.tick()
     assert ex.seen == {5, 6} and _it(store, 6).stage is Stage.VERIFY
+    assert _it(store, 5).stage is Stage.PARKED
 
 
 async def test_run_forever_clears_stale_busy_flags(env) -> None:  # type: ignore[no-untyped-def]

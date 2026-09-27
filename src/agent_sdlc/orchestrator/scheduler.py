@@ -89,12 +89,6 @@ class Scheduler:
         self._limits = limits or GlobalLimits()
         self._running: dict[int, threading.Thread] = {}   # item id -> step thread (spec §1)
         self._run_lock = threading.Lock()
-        # Launch order bookkeeping: `Store.items` orders by (created_at, id), which never
-        # changes, so without this the item that just freed a slot would win it right back
-        # forever instead of yielding to an item that has been waiting (fix for the brief's
-        # own test_limit_holds_and_freed_slot_is_refilled).
-        self._launch_seq = 0
-        self._last_launched: dict[int, int] = {}
 
     # loop ------------------------------------------------------------------
     async def run_forever(self, poll_s: int = 60,
@@ -165,11 +159,8 @@ class Scheduler:
         with self._run_lock:
             running = set(self._running)
         free = self._t.limits.max_concurrent_items - len(running)
-        waiting = [i for i in active if i.id not in running]
-        # Least-recently-launched first (never-launched items sort first), then re-sorted by
-        # in_flight's stable TRIAGE-last rule so that preference is unaffected.
-        waiting.sort(key=lambda i: self._last_launched.get(i.id, -1))
-        return in_flight(waiting, max(free, 0))
+        waiting = [i for i in in_flight(active, len(active)) if i.id not in running]
+        return waiting[:max(free, 0)]
 
     def _launch(self, item: Item, now: datetime) -> threading.Thread:
         """One daemon thread with its own event loop per item step (spec §1)."""
@@ -185,8 +176,6 @@ class Scheduler:
         th = threading.Thread(target=run, name=f"item-{_ref(item)}", daemon=True)
         with self._run_lock:
             self._running[item.id] = th
-            self._last_launched[item.id] = self._launch_seq
-            self._launch_seq += 1
         th.start()
         return th
 
