@@ -55,6 +55,7 @@ from agent_sdlc.types import (
     EventInput,
     Item,
     ParkReason,
+    PrComment,
     Stage,
     Usage,
 )
@@ -75,6 +76,8 @@ class StepResult:
     pr_id: int | None = None
     labels: list[LabelInput] = field(default_factory=list)
     events: list[EventInput] = field(default_factory=list)
+    # PR replies the scheduler sends after committing the step (spec §3.3)
+    replies: list[tuple[PrComment, str]] = field(default_factory=list)
 
 
 def _logged(
@@ -388,6 +391,7 @@ class StageExecutor:
         logged: list[tuple[Decision, dict[str, Any]]] = []
         labels: list[LabelInput] = []
         events: list[EventInput] = []
+        replies: list[tuple[PrComment, str]] = []
         for c in self._forge.pr_comments(item.pr_id):
             if c.key in seen:
                 continue
@@ -409,7 +413,7 @@ class StageExecutor:
             outcomes.append(CommentOutcome(c, intent))
             if intent in ("question", "uncertain") and status == "active":
                 reply = QUESTION_REPLY if intent == "question" else UNCERTAIN_REPLY
-                self._forge.reply_pr(item.pr_id, c, reply)
+                replies.append((c, reply))
         t = after_pr_poll(status, outcomes, item.pr_rounds, self._t.limits.max_pr_rounds)
         return StepResult(t, decisions=logged, data={"seen_comments": seen}, labels=labels,
-                          events=events)
+                          events=events, replies=replies)

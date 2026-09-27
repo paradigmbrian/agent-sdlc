@@ -29,6 +29,7 @@ from agent_sdlc.types import (
     EventInput,
     Item,
     ParkReason,
+    PrComment,
     Stage,
     Usage,
     UsageLimitError,
@@ -321,6 +322,7 @@ class Scheduler:
                 "pr_id": new.pr_id}))
         self._store.commit_step(new, res.decisions, res.usage, now.date(), labels,
                                 events=events, at=item)
+        self._send_replies(new, res.replies)
         if new.stage is not item.stage:
             log.info("%s -> %s%s", item.stage.value, new.stage.value,
                      f" ({new.park_reason.value})" if new.park_reason else "")
@@ -342,6 +344,16 @@ class Scheduler:
         self._store.save(replace(item, infra_failures=n,
                                  data={**item.data, "retry_after": retry.isoformat()}),
                          events=events, at=item)
+
+    def _send_replies(self, item: Item, replies: list[tuple[PrComment, str]]) -> None:
+        """After the commit that saved seen_comments, so a reply is sent at most once (§3.3)."""
+        for comment, text in replies:
+            try:
+                self._forge.reply_pr(item.pr_id or 0, comment, text)
+            except _INFRA_ERRORS as e:
+                log.warning("reply to %s failed on %s: %s", comment.key, _ref(item), e)
+                self._store.add_event("pr_reply_failed",
+                                      {"comment": comment.key, "error": str(e)[:500]}, item=item)
 
     def _park_side_effects(self, item: Item) -> None:
         """Tag first, and record that the tag is set, before commenting: only a confirmed tag

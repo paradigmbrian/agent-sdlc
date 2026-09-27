@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from agent_sdlc.adapters.errors import ForgeError
+from agent_sdlc.orchestrator.reporting import QUESTION_REPLY
 from agent_sdlc.orchestrator.stages import StageExecutor
 from agent_sdlc.policy import PathPolicy
 from agent_sdlc.targets import TargetConfig
@@ -148,7 +149,8 @@ async def test_awaiting_handles_comments(parts) -> None:  # type: ignore[no-unty
     res = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr))
     assert res.transition.to is Stage.IMPLEMENT and "/agent rename it" in res.transition.feedback
     assert res.data["seen_comments"] == ["thread:1:1", "thread:2:1"]
-    assert [t for _, t, _ in ado.replies] == [2]
+    assert ado.replies == []                                   # the scheduler sends them
+    assert [(c.thread_id, text) for c, text in res.replies] == [(2, QUESTION_REPLY)]
     assert [lab.gold for lab in res.labels] == ["change_request"]
     again = await ex.run(item(Stage.AWAITING_HUMAN, pr_id=pr, data=res.data))
     assert again.transition.to is Stage.AWAITING_HUMAN

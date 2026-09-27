@@ -23,6 +23,7 @@ from agent_sdlc.types import (
     EventInput,
     Item,
     ParkReason,
+    PrComment,
     Stage,
     Usage,
     UsageLimitError,
@@ -781,3 +782,47 @@ async def test_run_forever_stops_on_event(env) -> None:  # type: ignore[no-untyp
 
     await sched(env, Once()).run_forever(poll_s=60, stop=stop)
     assert env[0].get_by_ref("fixture", 5).stage is Stage.PLAN
+
+
+# --- Task 5: PR replies after the commit ---------------------------------------------------
+
+
+@dataclass
+class ReplyForge(FakeForge):
+    store: Store | None = None
+    fail_replies: bool = False
+    seen_at_reply: list[list[str]] = field(default_factory=list)
+
+    def reply_pr(self, pr_id: int, comment: PrComment, text: str) -> None:
+        assert self.store is not None
+        self.seen_at_reply.append(list(self.store.get_by_ref("fixture", 5)
+                                       .data.get("seen_comments", [])))
+        if self.fail_replies:
+            raise httpx.ConnectError("down")
+        super().reply_pr(pr_id, comment, text)
+
+
+async def test_replies_are_sent_after_the_commit_and_at_most_once(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig
+) -> None:
+    store = Store("sqlite://")
+    forge = ReplyForge(store=store, fail_replies=True)
+    forge.add(WI)
+    pr = forge.create_pr("agent/5-add-feature", "t", "b", 5)
+    forge.pr_threads[pr] = [PrComment(2, 1, "Brian", "why this approach?")]
+    decider = FakeDecider()
+    decider.answers["comment"] = {"comment_intent": "question"}
+    ws = Workspaces(tmp_path / "ws", target)
+    ex = StageExecutor(target=target, forge=forge, decider=decider, runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(target.policy.protected_paths),
+                       decisions_for=store.decisions_for)
+    s = Scheduler(target=target, store=store, executor=ex, forge=forge, workspaces=ws,
+                  clock=lambda: NOW)
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    store.save(replace(_it(store), stage=Stage.AWAITING_HUMAN, pr_id=pr))
+    await s.tick()
+    assert forge.seen_at_reply == [["thread:2:1"]]            # saved before the reply
+    assert [e.kind for e in store.events_for(_it(store).id)].count("pr_reply_failed") == 1
+    forge.fail_replies = False
+    await s.tick()
+    assert forge.seen_at_reply == [["thread:2:1"]] and forge.replies == []   # not re-sent
