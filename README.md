@@ -51,7 +51,9 @@ Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md` plus
   `auth`, `laya`, daily turn/token caps, `max_concurrent_sessions`, `run_window`.
 - `targets/<name>.yaml` holds one repository: `forge` (`kind: ado` or `kind: github`),
   `intake` labels, `repo` (base branch, branch prefix, install list, verify commands), `policy`
-  and per-item `limits`.
+  and per-item `limits`. `limits.max_agent_errors` (default 3) caps failed agent sessions per
+  stage before it parks `agent_error`; it is separate from `limits.max_verify_retries`, which
+  caps the implement ↔ verify/review loop (red checks, blocking reviews).
 - `--config <file>` picks another global config; `--target <file>` runs a single target with
   default global settings.
 - State lives in `~/.agent-sdlc/agent-sdlc-v2.db`. Items are referenced as `<target>#<id>`
@@ -79,7 +81,7 @@ Design: `docs/superpowers/specs/2026-09-23-agent-sdlc-design.md` plus
 ```bash
 uv run agent-sdlc status
 uv run agent-sdlc status --target-name triathlon
-uv run agent-sdlc run --once --dry-run-push   # full pipeline, no push, prints PR body
+uv run agent-sdlc run --once --dry-run        # preview one tick; no DB, worktree or tracker writes
 uv run agent-sdlc run                         # loop (polls every 60s)
 uv run agent-sdlc pause | resume              # kill switch
 uv run agent-sdlc pause --target-name triathlon
@@ -91,10 +93,26 @@ uv run agent-sdlc metrics [--days 30]          # outcomes, parks, effort, latenc
 Opt an item in by adding the `agent` tag (ADO) or label (GitHub). Parked items get a comment and
 the `agent:parked` tag; removing the tag approves proceeding past a gate park or retries a failed
 stage. On a PR, start a comment with `/agent` to request a revision; on GitHub a "Request changes"
-review also counts.
+review also counts. Commits you push to the PR branch are merged in before the next revision;
+files you changed are exempt from protected-path, manifest and diff-size checks until the agent
+edits them.
 
 `status` also shows when the loop last ticked (`LOOP NOT RUNNING?` after 3 missed polls) and
 marks items with no event for `limits.stale_after_minutes` as `STALE`.
+
+`limits.max_concurrent_items` items of a target run at the same time (one thread each);
+`max_concurrent_sessions` still caps agent sessions across all targets. `status` shows one
+`busy:` line per running item.
+
+### Dry run
+
+`--dry-run` (with `--once`) previews one tick in isolation: the DB is snapshotted into a temp
+copy (the real DB is never opened for writing), worktrees are created in a temp workspaces root
+and discarded at the end, and the tracker (ADO/GitHub) is read but never written — no comments,
+labels, pushes, PRs or replies. Traces are still kept, under
+`~/.agent-sdlc/dry-run/<timestamp>/traces` by default. Laya and Claude run for real against this
+copy, so a dry run still costs real tokens; those tokens are recorded only in the temp DB and are
+not counted against the real daily caps.
 
 ### Traces and logs
 
@@ -113,6 +131,12 @@ marks items with no event for `limits.stale_after_minutes` as `STALE`.
   removing the tag approves exactly that change, and install and verify run with it. A later
   different change parks again.
 - `budget` mid-session: the agent was stopped when the item's token budget ran out.
+- `needs_human` "PR branch has diverged and could not be merged": a human's commits on the PR
+  branch conflict with the agent's history. Resolve the conflict on the branch, then remove the
+  tag.
+- `needs_human` "The implementer made no changes for the feedback": a revision round (a change
+  request, red checks, or review notes) ran and committed nothing. Clarify the request, then
+  remove the tag.
 
 Tooling config that verify executes (eslint/vite/postcss/tailwind/prettier config, `turbo.json`,
 `.npmrc`, rc-style files such as `.prettierrc`, `.babelrc` and `.eslintrc.json`, `.config/**`,

@@ -25,18 +25,26 @@ slot that frees up is refilled on the next poll, not when the slowest item finis
 **Scheduler.**
 
 - `Scheduler` keeps `_running: dict[int, threading.Thread]` (item id → thread) under a lock.
-- `tick(wait: bool = False)`:
+- `tick(wait: bool = True)`:
   1. As today: last-tick flag, pause check, intake, requeue, stale warning.
-  2. AWAITING_HUMAN items are polled serially in the tick thread (cheap).
+  2. AWAITING_HUMAN items are polled serially in the tick thread (cheap). The set of running item
+     ids is snapshotted before the AWAITING_HUMAN rows are read, and again before the rows are
+     read in `_to_launch` and in `_requeue_untagged`: an item whose thread finishes mid-scan has
+     already committed its write in its `finally`, so a row read after the snapshot is fresh for
+     it; reading rows first could instead catch a stale row and step or park-side-effect it a
+     second time.
   3. If agent work is allowed: `free = max_concurrent_items − len(_running)`. From the active
      items in `in_flight` order (created-at, triage last), skip running ones and launch the first
-     `free` of the rest. Each launch is a daemon thread running `asyncio.run(self._step(item,
-     now))`; the thread removes itself from `_running` in a `finally`.
+     `free` of the rest. Order is not rotated: the oldest active item keeps its slot for as long
+     as it stays in an active stage, whether or not it happens to be running this tick. Each
+     launch is a daemon thread running `asyncio.run(self._step(item, now))`; the thread removes
+     itself from `_running` in a `finally`.
   4. With `wait=True`, join the threads launched by this tick before returning.
 - Running items are excluded before the limit is applied, so a requeued item that sorts ahead
   cannot push the running count over the limit.
 - `run --once` calls `tick(wait=True)` (via `Supervisor._once`), so its exit code still covers
-  every item. `run_forever` calls `tick()`.
+  every item — this is also `tick`'s default. `run_forever` is the only caller that passes
+  `tick(wait=False)`.
 - Pause: a paused tick launches nothing; running sessions stop through the existing
   `should_stop` check. Shutdown: threads are daemons, as target threads are today.
 - `_run_step` already catches every exception per item; the thread wrapper only logs what escapes.
@@ -46,16 +54,18 @@ slot that frees up is refilled on the next poll, not when the slowest item finis
 - Store (session per call, SQLite WAL + busy timeout), `LockedDecider`, `SessionSlots` and
   `GitHubAppAuth` are already thread-safe.
 - `Workspaces` gets a `threading.Lock` held around `_ensure_base` + `worktree add` in `create`,
-  and around `remove` (`worktree remove`/`prune`, `branch -D`), which all write the shared base
-  `.git`. Per-worktree git commands stay unlocked.
+  around `remove` (`worktree remove`/`prune`, `branch -D`), and around the PR-branch fetch in
+  `incorporate_remote` (§3.1) — all four write or read the shared base `.git`, and the fetch
+  opportunistically updates the shared remote-tracking ref `refs/remotes/origin/<branch>`, which
+  would race `_ensure_base`'s own `fetch --prune`. Per-worktree git commands stay unlocked.
 - The scratch HOME's npm and uv caches tolerate concurrent use.
 
 **Busy flags.**
 
 - `busy:<target>` becomes one flag per item: `busy:<target>:<external_id>` = `<stage>|<since>`.
 - New `Store.flags(prefix: str) -> dict[str, str]`.
-- At construction the scheduler deletes its target's `busy:<target>:*` flags (left by a crashed
-  process).
+- Stale busy flags (left by a crashed process) are cleared at the start of `run_forever`, not at
+  construction: `cli requeue` also builds a `Scheduler` and must not wipe a live loop's flags.
 - `status` prints one `busy:` line per flag, each with the existing `STUCK?` check. Ticks no longer
   block on steps, so `LOOP NOT RUNNING?` needs no busy exception.
 
@@ -94,9 +104,11 @@ path when the run ends.
 **Not isolated.** Laya and Claude run for real. Their usage is recorded only in the copy, so the
 real daily caps do not count dry-run tokens. The README says so.
 
-**Tests.** After a dry run that reaches `awaiting_human`, the real DB file is byte-identical; a
-write-spy inner forge records no writes; the temp workspaces root is gone and the traces directory
-exists; `--dry-run` without `--once` and with a non-SQLite URL each exit 1.
+**Tests.** After a dry run that reaches `awaiting_human`, the real DB is byte-identical: its data
+files, `<db>` and `<db>-wal`, are unchanged; `<db>-shm` is excluded from the comparison because it
+is SQLite's shared-memory reader index, which any reader touches, including the dry run's own
+backup read. A write-spy inner forge records no writes; the temp workspaces root is gone and the
+traces directory exists; `--dry-run` without `--once` and with a non-SQLite URL each exit 1.
 
 ## 3. PR revision rounds
 
@@ -115,18 +127,29 @@ At the start of `_implement`, when `item.pr_id` is set, before the manifest gate
 
 New `Workspaces.incorporate_remote(wt, branch) -> list[str]` returns the paths the human commits
 changed (`git diff --name-only <old HEAD> <new HEAD>`, empty when nothing was merged) and raises
-`MergeConflict(files)` on step 5.
+`MergeConflict(files)` on step 5. New `Workspaces.human_blobs(wt) -> dict[str, str]` computes
+`data["human_blobs"]` as described below; it returns `{}` when nothing has been fetched yet (no
+`incorporate_remote` call, or the remote branch doesn't exist).
 
-**Human-changed protected and manifest paths.** Policy and the manifest gate check the whole diff
-against base, so a human's own edit to a protected path or manifest would park every round. After
-incorporating:
+**Human-changed paths.** Policy, the manifest gate and the diff-size limit all check the whole
+diff against base, so a human's own edit to a protected path, a manifest, or just a large edit
+would park every round. `data["human_blobs"]` is not taken from the merge; it is recomputed on
+every PR-round implement, after incorporating, by `Workspaces.human_blobs(wt)`:
 
-- `data["human_blobs"]` is updated with `{path: blob at HEAD}` for each returned path that is
-  protected or a manifest.
-- A helper `_agent_owned(wt, paths, item) -> list[str]` drops each path whose HEAD blob equals
+- The paths changed by non-merge commits in `origin/<base>..FETCH_HEAD` whose author email is not
+  the agent identity (`agent-sdlc@localhost`) — a human committing with the agent identity is
+  treated as the agent — each mapped to its blob at `FETCH_HEAD` (`"deleted"` when the path is
+  absent there).
+- The stored map is replaced with this result each round, rather than merged into what was there
+  before. Deriving it fresh from the worktree's own history, rather than keeping it as stored
+  state, means an interrupted step never leaves it stale, and it survives a crash between steps.
+- A helper `_agent_owned(item, wt, paths) -> list[str]` drops each path whose current blob equals
   `human_blobs[path]`. It filters the input of `PathPolicy.violations` in `_policy_park`, the
-  implement violation check and the lint-commit check, and of `_manifest_gate`.
-- When the agent later edits such a file its blob differs, so the check applies again.
+  diff-size limit, the implement violation check and the lint-commit check, and of
+  `_manifest_gate`.
+- When the agent later edits such a file its blob differs, so the check applies again. Because the
+  comparison is by blob rather than by "who touched it last," an agent edit that git auto-merged
+  into a file a human also edited is still judged on its own blob, separately from the human's.
 
 ### 3.2 Rounds that change nothing (F4)
 
@@ -176,7 +199,10 @@ second reply on the next poll.
   are the ones stored in `data["checks"]`.
 - If the second run modifies tracked files again (a non-idempotent fixer), `reset --hard HEAD`
   discards them and the step logs a warning; there is no third run.
-- `check` events gain `"pass": 1 | 2`.
+- `check_event(r, pass_=None)` adds `"pass": 1 | 2` to the event only when `pass_` is given, for
+  verify's own check commands on their first and (when a lint commit triggers one) second run.
+  Install events and other `check` events that don't go through verify's re-check pass keep no
+  `"pass"` key, so `tests/test_events.py` and the install-event shape are unchanged.
 
 **Tests.** A planner max-turns error leaves `attempt` at 0 and the next verify still gets every
 retry; the per-stage counter resets on success and parks at `max_agent_errors`; a target file
