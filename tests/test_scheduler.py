@@ -16,6 +16,7 @@ from agent_sdlc.policy import PathPolicy
 from agent_sdlc.store import Store
 from agent_sdlc.targets import RunWindow, TargetConfig
 from agent_sdlc.types import (
+    ACTIVE_STAGES,
     AgentInfraError,
     AgentInterrupted,
     AgentResult,
@@ -363,9 +364,11 @@ class GatedExecutor:
                 barrier: threading.Barrier | None = None) -> None:
         self.results, self.gates, self.barrier = results, gates or {}, barrier
         self.seen: set[int] = set()
+        self.calls: list[int] = []  # every call, including repeats (fix round 1 regressions)
 
     async def run(self, item: Item) -> StepResult:
         self.seen.add(item.external_id)
+        self.calls.append(item.external_id)
         if self.barrier is not None:
             self.barrier.wait(5)             # every item must be running at the same time
         gate = self.gates.get(item.external_id)
@@ -461,6 +464,82 @@ async def test_requeue_scan_skips_a_running_item(env) -> None:  # type: ignore[n
     assert ado.wi_comments == [] and "agent:parked" not in ado.tags[5]
     gate.set()
     _drain(s)
+
+
+async def test_to_launch_does_not_relaunch_item_finishing_mid_scan(  # type: ignore[no-untyped-def]
+    env
+) -> None:
+    """Fix round 1: `_to_launch` must snapshot `_running` before reading ACTIVE_STAGES rows.
+    `_warn_stale` makes the first ACTIVE_STAGES read each tick and `_to_launch` the second;
+    from inside that second read, force item 5's thread to finish (release its gate and join
+    it) before the row read returns, so the read always sees a fresh (non-IMPLEMENT) row. With
+    the running snapshot taken before that read, item 5 is still excluded even though its
+    thread has since finished; taking it after would let the freed slot go right back to the
+    item whose stale IMPLEMENT row was `_to_launch`'s own reason to launch it a second time."""
+    store, ado, ws, target = env
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    store.save(replace(_it(store), stage=Stage.IMPLEMENT))
+    gate = threading.Event()
+    ex = GatedExecutor({5: StepResult(Transition(Stage.VERIFY))}, gates={5: gate})
+    s = sched(env, ex)
+    await s.tick(wait=False)
+    _until(lambda: 5 in ex.seen)  # controller ruling: wait for the executor to actually start
+
+    real_items = store.items
+    active_calls = 0
+    released = threading.Event()
+
+    def racy_items(target_name, stages=None):  # type: ignore[no-untyped-def]
+        nonlocal active_calls
+        if stages == ACTIVE_STAGES:
+            active_calls += 1
+            if active_calls == 2 and not released.is_set():  # _to_launch's own read
+                released.set()
+                gate.set()
+                next(iter(s._running.values())).join(5)  # noqa: SLF001 - force the finish now
+        return real_items(target_name, stages)
+
+    store.items = racy_items  # type: ignore[method-assign]
+    try:
+        await s.tick(wait=False)
+    finally:
+        store.items = real_items  # type: ignore[method-assign]
+    _drain(s)  # let any wrongly-relaunched thread actually reach the executor before asserting
+    assert ex.calls.count(5) == 1
+
+
+async def test_requeue_scan_snapshots_running_before_reading_rows(  # type: ignore[no-untyped-def]
+    env
+) -> None:
+    """Fix round 1: `_requeue_untagged` must snapshot `_running` before reading PARKED rows,
+    so an item whose own thread is still mid-`_park_side_effects` (row already PARKED, tag
+    and comment already sent for real once, but `parked_tag_set` not yet re-saved) isn't
+    reprocessed off that stale row just because the thread happens to finish before the
+    per-item check would otherwise run."""
+    store, ado, ws, target = env
+    store.add_item("fixture", WI, "agent/5-add-feature")
+    item = _it(store)
+    store.save(replace(item, stage=Stage.PARKED, park_reason=ParkReason.RED,
+                       parked_from=Stage.VERIFY))   # committed by commit_step; parked_tag_set
+                                                     # not yet re-saved by _park_side_effects
+    ado.set_label(5, "agent:parked", True)
+    ado.comment_item(5, "<p>parked once</p>")       # as if its own thread already did this
+    s = sched(env, GatedExecutor({}))
+    s._running[item.id] = threading.Thread(target=lambda: None)  # noqa: SLF001 - "still running"
+
+    real_items = store.items
+
+    def racy_items(target_name, stages=None):  # type: ignore[no-untyped-def]
+        if stages == [Stage.PARKED]:
+            s._running.pop(item.id, None)  # noqa: SLF001 - the thread finishes during this read
+        return real_items(target_name, stages)
+
+    store.items = racy_items  # type: ignore[method-assign]
+    try:
+        s._requeue_untagged()  # noqa: SLF001 - unit-level: exercises the read/snapshot order
+    finally:
+        store.items = real_items  # type: ignore[method-assign]
+    assert ado.wi_comments == [(5, "<p>parked once</p>")]  # not parked a second time
 
 
 async def test_i1_error_on_one_item_does_not_stop_others(env) -> None:  # type: ignore[no-untyped-def]

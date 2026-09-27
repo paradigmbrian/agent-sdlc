@@ -126,9 +126,9 @@ class Scheduler:
         for key in self._store.flags(f"busy:{self._t.name}:"):
             self._store.set_flag(key, None)
 
-    def _is_running(self, item_id: int) -> bool:
+    def _running_ids(self) -> set[int]:
         with self._run_lock:
-            return item_id in self._running
+            return set(self._running)
 
     async def tick(self, wait: bool = True) -> None:
         now = self._clock()
@@ -138,8 +138,13 @@ class Scheduler:
         self._intake()
         self._requeue_untagged()
         self._warn_stale(now)
+        # Snapshot before reading rows (fix round 1): an item thread that finishes between
+        # the snapshot and the row read has already committed its write in `finally`, so a
+        # row read afterwards is fresh; reading rows first could catch a stale row for an
+        # item whose thread finishes in between, and re-act on it.
+        running = self._running_ids()
         for item in self._store.items(self._t.name, [Stage.AWAITING_HUMAN]):
-            if not self._is_running(item.id):
+            if item.id not in running:
                 await self._step(item, now)
         if not self._agent_work_allowed(now):
             return
@@ -155,9 +160,8 @@ class Scheduler:
     def _to_launch(self) -> list[Item]:
         """In-flight items not already running, up to the free slots. Running items are left
         out before the limit applies, so a requeued item that sorts ahead can't exceed it."""
+        running = self._running_ids()  # snapshot before the row read (fix round 1)
         active = self._store.items(self._t.name, ACTIVE_STAGES)
-        with self._run_lock:
-            running = set(self._running)
         free = self._t.limits.max_concurrent_items - len(running)
         waiting = [i for i in in_flight(active, len(active)) if i.id not in running]
         return waiting[:max(free, 0)]
@@ -206,8 +210,9 @@ class Scheduler:
                 log.info("intake: %s#%s %s", self._t.name, wi.id, wi.title)
 
     def _requeue_untagged(self) -> None:
+        running = self._running_ids()  # snapshot before the row read (fix round 1)
         for item in self._store.items(self._t.name, [Stage.PARKED]):
-            if self._is_running(item.id):
+            if item.id in running:
                 continue   # its own thread is still committing and running side effects
             if not item.data.get("parked_tag_set"):
                 # The park tag was never confirmed set, so a missing tag is not a human
