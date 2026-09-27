@@ -131,9 +131,10 @@ not counted against the real daily caps.
   removing the tag approves exactly that change, and install and verify run with it. A later
   different change parks again.
 - `budget` mid-session: the agent was stopped when the item's token budget ran out.
-- `needs_human` "PR branch has diverged and could not be merged": a human's commits on the PR
-  branch conflict with the agent's history. Resolve the conflict on the branch, then remove the
-  tag.
+- `needs_human` "PR branch has diverged and could not be merged": the PR branch's remote history
+  conflicts with the agent's unpushed commits in its worktree (the human cannot see this on the
+  remote branch itself). Resolve the conflict in the worktree named in the comment, or discard
+  those commits, then remove the tag.
 - `needs_human` "The implementer made no changes for the feedback": a revision round (a change
   request, red checks, or review notes) ran and committed nothing. Clarify the request, then
   remove the tag.

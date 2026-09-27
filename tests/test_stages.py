@@ -656,8 +656,12 @@ async def test_pr_round_conflict_parks_with_files(  # type: ignore[no-untyped-de
     ws.commit(wt, "feat: unpushed")
     res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
     assert res.transition.park_reason is ParkReason.NEEDS_HUMAN
-    assert res.transition.note == ("PR branch has diverged and could not be merged: "
-                                   "feature.txt")
+    # Finding 3: the conflict is with the agent's unpushed local commits, which a human can't
+    # see on the remote PR branch, so the note points at the worktree that holds them.
+    assert res.transition.note.startswith(
+        "PR branch has diverged and could not be merged: feature.txt")
+    assert f"unpushed commits in {wt}" in res.transition.note
+    assert "remove the parked tag" in res.transition.note
     assert git("status", "--porcelain", cwd=wt) == ""
 
 

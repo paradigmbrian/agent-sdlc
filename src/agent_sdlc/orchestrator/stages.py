@@ -234,7 +234,9 @@ class StageExecutor:
         except MergeConflict as e:
             return StepResult(park(
                 ParkReason.NEEDS_HUMAN,
-                "PR branch has diverged and could not be merged: " + ", ".join(e.files)))
+                "PR branch has diverged and could not be merged: " + ", ".join(e.files) +
+                f". The conflict is with the agent's unpushed commits in {wt}; resolve it "
+                "there (or discard those commits), then remove the parked tag."))
         human = self._ws.human_blobs(wt)
         if human == (item.data.get("human_blobs") or {}):
             return item
