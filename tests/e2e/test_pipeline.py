@@ -77,8 +77,12 @@ async def test_happy_path_to_pr_then_merge(env: Env) -> None:
 
 
 async def test_red_tests_park_after_retries(env: Env) -> None:
+    calls = 0
+
     def break_it(role, prompt, cwd):  # type: ignore[no-untyped-def]
-        (cwd / "broken.txt").write_text(prompt[-20:])
+        nonlocal calls
+        calls += 1
+        (cwd / "broken.txt").write_text(f"attempt {calls}\n")
         return AgentResult("done", Usage(1, 10, 10))
 
     env.runner.behaviors["implementer"] = break_it
