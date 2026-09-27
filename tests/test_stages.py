@@ -20,6 +20,7 @@ from agent_sdlc.types import (
     WorkItem,
 )
 from agent_sdlc.workspaces import Workspaces
+from tests.conftest import git
 from tests.fakes import FakeDecider, FakeForge, FakeRunner
 
 WI = WorkItem(5, "Add feature", "Please add feature.txt", "feature.txt exists", "Bug",
@@ -537,3 +538,132 @@ async def test_agent_waits_for_a_session_slot_and_honours_pause(  # type: ignore
             await ex.run(item(Stage.PLAN))
     res = await ex.run(item(Stage.PLAN))  # slot free again: runs even though should_stop is set
     assert res.transition.to is Stage.IMPLEMENT
+
+
+# --- task 6: incorporate human commits; judge only the agent's files --------------------------
+
+
+BRANCH = "agent/5-add-feature"
+
+
+def _pr_branch(ws: Workspaces, ado: FakeForge) -> Path:
+    """Worktree with an agent commit pushed to origin, as after a PR was opened."""
+    wt = ws.create(5, BRANCH)
+    (wt / "feature.txt").write_text("v1\n")
+    ws.commit(wt, "feat: v1")
+    ado.push_branch(wt, BRANCH)
+    return wt
+
+
+def _human(tmp_path: Path, origin: Path, files: dict[str, str | None]) -> None:
+    h = tmp_path / "human"
+    if not h.exists():
+        git("clone", "-q", str(origin), str(h), cwd=tmp_path)
+    git("fetch", "-q", "origin", cwd=h)
+    git("checkout", "-q", "-B", BRANCH, f"origin/{BRANCH}", cwd=h)
+    for name, content in files.items():
+        if content is None:
+            git("rm", "-q", name, cwd=h)
+        else:
+            (h / name).parent.mkdir(parents=True, exist_ok=True)
+            (h / name).write_text(content)
+    git("add", "-A", cwd=h)
+    git("-c", "user.name=h", "-c", "user.email=h@h", "commit", "-qm", "human", cwd=h)
+    git("push", "-q", "origin", f"HEAD:refs/heads/{BRANCH}", cwd=h)
+
+
+PR_ROUND = {"plan": "p", "feedback": "Reviewer requested changes"}
+
+
+async def test_pr_round_incorporates_human_commits(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    ex, ado, ws, *_ = parts
+    wt = _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"human.txt": "fix\n"})
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.to is Stage.VERIFY
+    assert (wt / "human.txt").read_text() == "fix\n"
+    assert res.data["human_blobs"].keys() == {"human.txt"}
+
+
+async def test_pr_round_conflict_parks_with_files(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    ex, ado, ws, *_ = parts
+    wt = _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"feature.txt": "human\n"})
+    (wt / "feature.txt").write_text("agent local\n")
+    ws.commit(wt, "feat: unpushed")
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.park_reason is ParkReason.NEEDS_HUMAN
+    assert res.transition.note == ("PR branch has diverged and could not be merged: "
+                                   "feature.txt")
+    assert git("status", "--porcelain", cwd=wt) == ""
+
+
+async def test_human_protected_edit_passes_but_agent_edit_is_caught(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    ex, ado, ws, _, runner = parts
+    _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"infra/main.tf": "human\n"})
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.to is Stage.VERIFY
+    human = res.data["human_blobs"]
+
+    def edit_infra(role, prompt, cwd):  # type: ignore[no-untyped-def]
+        (cwd / "infra" / "main.tf").write_text("agent\n")
+        return AgentResult("done", Usage(1, 1, 1))
+
+    runner.behaviors = {"implementer": edit_infra}
+    again = await ex.run(item(Stage.IMPLEMENT, pr_id=100,
+                              data={**PR_ROUND, "human_blobs": human}))
+    assert again.transition.park_reason is ParkReason.POLICY
+    assert "infra/main.tf" in again.transition.note
+
+
+async def test_human_manifest_edit_needs_no_approval(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    t = _with_manifests(target)
+    ado = FakeForge(origin=origin_repo)
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", t)
+    ex = StageExecutor(target=t, forge=ado, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(t.policy.protected_paths),
+                       decisions_for=lambda _id: [])
+    _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"package.json": '{"name": "x"}\n'})
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.to is Stage.VERIFY
+
+
+async def test_human_deleting_a_protected_file_passes(  # type: ignore[no-untyped-def]
+    tmp_path: Path, target: TargetConfig, origin_repo: Path
+) -> None:
+    """Review focus 5: deleting a protected base file is recorded as 'deleted' and is not
+    the agent's change. README.md exists on the base branch, so the deletion is in the diff."""
+    t = target.model_copy(update={"policy": target.policy.model_copy(
+        update={"protected_paths": [*target.policy.protected_paths, "README.md"]})})
+    ado = FakeForge(origin=origin_repo)
+    ado.add(WI)
+    ws = Workspaces(tmp_path / "ws", t)
+    ex = StageExecutor(target=t, forge=ado, decider=FakeDecider(), runner=FakeRunner(),
+                       workspaces=ws, path_policy=PathPolicy(t.policy.protected_paths),
+                       decisions_for=lambda _id: [])
+    _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"README.md": None})
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.data["human_blobs"] == {"README.md": "deleted"}
+    assert res.transition.to is Stage.VERIFY
+
+
+async def test_large_human_commit_does_not_trip_the_diff_limit(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    ex, ado, ws, *_ = parts
+    _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"big.txt": "".join(f"{i}\n" for i in range(500))})
+    res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
+    assert res.transition.to is Stage.VERIFY          # fixture max_diff_lines is 200

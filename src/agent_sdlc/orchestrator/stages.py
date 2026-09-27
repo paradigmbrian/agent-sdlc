@@ -58,7 +58,9 @@ from agent_sdlc.types import (
     PrComment,
     Stage,
     Usage,
+    WorkItem,
 )
+from agent_sdlc.workspaces import MergeConflict
 
 log = logging.getLogger(__name__)
 _KEPT_DENIALS = 10     # denials kept on the item for the PR body
@@ -195,14 +197,44 @@ class StageExecutor:
         return StepResult(t, res.usage, events=events, data=data)
 
     # policy, manifests & install --------------------------------------------
-    def _policy_park(self, wt: Path, when: str) -> StepResult | None:
+    def _agent_owned(self, item: Item, wt: Path, paths: list[str]) -> list[str]:
+        """`paths` minus those still exactly as a human pushed them (spec §3.1): policy, the
+        manifest gate and the diff limit judge only the agent's changes."""
+        human: dict[str, str] = item.data.get("human_blobs") or {}
+        theirs = [p for p in paths if p in human]
+        if not theirs:
+            return paths
+        now = self._ws.blobs(wt, theirs)
+        return [p for p in paths if p not in human or now[p] != human[p]]
+
+    def _agent_diff_lines(self, item: Item, wt: Path) -> int:
+        if not item.data.get("human_blobs"):
+            return self._ws.diff_lines(wt)
+        return self._ws.diff_lines(wt, self._agent_owned(item, wt, self._ws.changed_files(wt)))
+
+    def _incorporate(self, item: Item, wt: Path) -> Item | StepResult:
+        """Merge commits a human pushed to the PR branch and record the blobs of every path
+        they touched (spec §3.1). A conflict parks for a human."""
+        try:
+            touched = self._ws.incorporate_remote(wt, item.branch)
+        except MergeConflict as e:
+            return StepResult(park(
+                ParkReason.NEEDS_HUMAN,
+                "PR branch has diverged and could not be merged: " + ", ".join(e.files)))
+        if not touched:
+            return item
+        human = {**(item.data.get("human_blobs") or {}), **self._ws.blobs(wt, touched)}
+        return replace(item, data={**item.data, "human_blobs": human})
+
+    def _policy_park(self, item: Item, wt: Path, when: str) -> StepResult | None:
         """Protected-path and diff-limit checks, re-run wherever a park (e.g. an unapproved
         manifest) may have let a human requeue past them without a fresh recheck."""
-        violations = self._pp.violations(self._ws.changed_files(wt))
+        changed = self._agent_owned(item, wt, self._ws.changed_files(wt))
+        violations = self._pp.violations(changed)
         if violations:
             return StepResult(park(
                 ParkReason.POLICY, f"{when} found protected paths: " + ", ".join(violations)))
-        lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
+        lines, limit = self._agent_diff_lines(item, wt), self._t.policy.max_diff_lines
         if lines > limit:
             return StepResult(park(
                 ParkReason.POLICY,
@@ -212,7 +244,7 @@ class StageExecutor:
     def _manifest_gate(self, item: Item, wt: Path, resume: Stage) -> StepResult | None:
         """Park when the branch changes a manifest in a way no human has approved (§5.2).
         `resume` is where an approving requeue goes next."""
-        files = self._mp.violations(self._ws.changed_files(wt))
+        files = self._mp.violations(self._agent_owned(item, wt, self._ws.changed_files(wt)))
         if not files:
             return None
         digest = self._ws.blob_digest(wt, files)
@@ -276,6 +308,17 @@ class StageExecutor:
         wi = self._forge.get_item(item.external_id)
         wt = self._ws.create(item.external_id, item.branch)
         self._ws.reset(wt)
+        human: dict[str, Any] = {}
+        if item.pr_id:
+            merged = self._incorporate(item, wt)
+            if isinstance(merged, StepResult):
+                return merged
+            if merged is not item:
+                item, human = merged, {"human_blobs": merged.data["human_blobs"]}
+        res = await self._implement_changes(item, wi, wt)
+        return replace(res, data={**human, **res.data}) if human else res
+
+    async def _implement_changes(self, item: Item, wi: WorkItem, wt: Path) -> StepResult:
         # Resume at implement: pending feedback (e.g. a PR change request) must still apply (I2).
         if gate := self._manifest_gate(item, wt, Stage.IMPLEMENT):
             return gate
@@ -294,7 +337,8 @@ class StageExecutor:
             return failed
         self._ws.commit(wt, commit_message(wi, item.pr_rounds, self._forge.item_ref(wi.id)))
         files = self._ws.changed_files(wt)
-        t = after_implement(self._pp.violations(files), bool(files), self._ws.diff_lines(wt),
+        t = after_implement(self._pp.violations(self._agent_owned(item, wt, files)),
+                            bool(files), self._agent_diff_lines(item, wt),
                             self._t.policy.max_diff_lines)
         if t.to is Stage.VERIFY and (gate := self._manifest_gate(item, wt, Stage.VERIFY)):
             return replace(gate, usage=res.usage, events=events,
@@ -303,7 +347,7 @@ class StageExecutor:
 
     async def _verify(self, item: Item) -> StepResult:
         wt = self._ws.create(item.external_id, item.branch)
-        if policy := self._policy_park(wt, "Verify"):
+        if policy := self._policy_park(item, wt, "Verify"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
@@ -316,7 +360,8 @@ class StageExecutor:
         for r in results:
             log.info("check %s: exit %s (%ss)", r.name, r.exit_code, r.duration_s)
         if self._ws.commit(wt, "style: apply lint fixes"):
-            violations = self._pp.violations(self._ws.changed_files(wt))
+            changed = self._agent_owned(item, wt, self._ws.changed_files(wt))
+            violations = self._pp.violations(changed)
             if violations:
                 return StepResult(park(
                     ParkReason.POLICY,
@@ -324,7 +369,7 @@ class StageExecutor:
                     events=events, data=inst_data)
             if gate := self._manifest_gate(item, wt, Stage.VERIFY):
                 return replace(gate, events=events, data={**inst_data, **gate.data})
-            lines, limit = self._ws.diff_lines(wt), self._t.policy.max_diff_lines
+            lines, limit = self._agent_diff_lines(item, wt), self._t.policy.max_diff_lines
             if lines > limit:  # M9
                 return StepResult(park(
                     ParkReason.POLICY,
@@ -355,7 +400,7 @@ class StageExecutor:
     async def _pr_open(self, item: Item) -> StepResult:
         wi = self._forge.get_item(item.external_id)
         wt = self._ws.create(item.external_id, item.branch)
-        if policy := self._policy_park(wt, "Pre-push check"):
+        if policy := self._policy_park(item, wt, "Pre-push check"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
             return gate
