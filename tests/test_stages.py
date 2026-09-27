@@ -803,3 +803,32 @@ async def test_first_implement_without_changes_keeps_existing_park(  # type: ign
     runner.behaviors = {"implementer": _idle}
     res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
     assert res.transition.note == "The implementer made no changes."
+
+
+# --- finding 1: PR_OPEN incorporates a human push before its non-fast-forward push -----------
+
+
+async def test_pr_open_incorporates_human_push_and_returns_to_verify(  # type: ignore[no-untyped-def]
+    parts, tmp_path: Path, origin_repo: Path
+) -> None:
+    """A human push during implement/verify/review (after the item last incorporated) would
+    otherwise make PR_OPEN's push non-fast-forward. PR_OPEN must incorporate it itself and send
+    the merged tree back through VERIFY rather than fail the push."""
+    ex, ado, ws, *_ = parts
+    wt = _pr_branch(ws, ado)
+    _human(tmp_path, origin_repo, {"human.txt": "fix\n"})
+    res = await ex.run(item(Stage.PR_OPEN, pr_id=100, data={"plan": "p", "checks": []}))
+    assert res.transition.to is Stage.VERIFY
+    assert (wt / "human.txt").read_text() == "fix\n"
+    assert res.data["human_blobs"].keys() == {"human.txt"}
+
+
+async def test_pr_open_still_pushes_when_nothing_new_on_remote(  # type: ignore[no-untyped-def]
+    parts,
+) -> None:
+    ex, ado, ws, *_ = parts
+    _pr_branch(ws, ado)                                 # agent commit already pushed to origin
+    pr = ado.create_pr(BRANCH, "t", "b", 5)
+    res = await ex.run(item(Stage.PR_OPEN, pr_id=pr, data={"plan": "p", "checks": []}))
+    assert res.transition.to is Stage.AWAITING_HUMAN and res.pr_id == pr
+    assert ado.prs[pr]["updates"] == 1

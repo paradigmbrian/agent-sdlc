@@ -440,6 +440,19 @@ class StageExecutor:
     async def _pr_open(self, item: Item) -> StepResult:
         wi = self._forge.get_item(item.external_id)
         wt = self._ws.create(item.external_id, item.branch)
+        human_data: dict[str, Any] = {}
+        if item.pr_id:
+            # A human may have pushed to the PR branch since the last round: incorporate it
+            # before the push, so a non-fast-forward push cannot INFRA-park the item and strand
+            # it in PR_OPEN, which never incorporates on its own (finding 1).
+            before = self._ws.head(wt)
+            merged = self._incorporate(item, wt)
+            if isinstance(merged, StepResult):
+                return merged
+            if merged is not item:
+                item, human_data = merged, {"human_blobs": merged.data["human_blobs"]}
+            if self._ws.head(wt) != before:
+                return StepResult(Transition(Stage.VERIFY), data=human_data)
         if policy := self._policy_park(item, wt, "Pre-push check"):
             return policy
         if gate := self._manifest_gate(item, wt, Stage.VERIFY):
@@ -456,7 +469,8 @@ class StageExecutor:
             pr_id = self._forge.create_pr(item.branch, pr_title(wi, ref), body, wi.id)
             if pr_id:  # dry-run returns 0: there is no PR to point at (M6)
                 events += self._comment_plan(wi.id, str(item.data.get("plan", "")), pr_id)
-        return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id, events=events)
+        return StepResult(Transition(Stage.AWAITING_HUMAN), pr_id=pr_id, events=events,
+                          data=human_data)
 
     def _comment_plan(self, wi_id: int, plan: str, pr_id: int) -> list[EventInput]:
         """Best effort: once the PR exists, its id must be stored, so a failed comment must not
