@@ -226,7 +226,8 @@ def test_flags_by_prefix_escapes_wildcards() -> None:
 
 
 def _files(db: Path) -> dict[str, bytes]:
-    return {p.name: p.read_bytes() for p in db.parent.glob(db.name + "*")}
+    return {p.name: p.read_bytes() for p in db.parent.glob(db.name + "*")
+            if not p.name.endswith("-shm")}
 
 
 def test_snapshot_copies_uncheckpointed_wal_and_leaves_source_untouched(tmp_path: Path) -> None:

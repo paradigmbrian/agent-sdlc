@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import threading
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, closing, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -467,22 +468,14 @@ class Store:
 
 
 def snapshot_sqlite(url: str, dest: Path) -> str:
-    """A consistent copy of a SQLite state DB for a dry run, read through a read-only
-    connection so the source is never written (spec §2). A missing source gives an empty copy."""
+    """A consistent copy of a SQLite state DB for a dry run, via a read-only connection
+    and the online backup API, so concurrent writes to the source don't corrupt the copy.
+    A missing source gives an empty copy (spec §2)."""
     if not url.startswith("sqlite:///"):
         raise ValueError(f"not a SQLite file URL: {url}")
     src = Path(url.removeprefix("sqlite:///"))
     if src.exists():
-        # Copy the database files directly without opening a connection to the source,
-        # so SQLite doesn't modify the source's shared memory (shm) file (spec §2).
-        with open(src, "rb") as src_db:
-            with open(dest, "wb") as dest_db:
-                dest_db.write(src_db.read())
-        # Copy WAL file if it exists
-        src_wal = Path(str(src) + "-wal")
-        if src_wal.exists():
-            dest_wal = Path(str(dest) + "-wal")
-            with open(src_wal, "rb") as wal_file:
-                with open(dest_wal, "wb") as dest_f:
-                    dest_f.write(wal_file.read())
+        with closing(sqlite3.connect(f"{src.resolve().as_uri()}?mode=ro", uri=True)) as s, \
+                closing(sqlite3.connect(dest)) as d:
+            s.backup(d)
     return f"sqlite:///{dest}"
