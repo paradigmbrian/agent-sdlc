@@ -229,3 +229,17 @@ def test_requeue_manifest_without_resume_defaults_to_verify() -> None:
     it = Item(1, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.MANIFEST,
               parked_from=Stage.PR_OPEN, data={"manifest_pending": "abc"})
     assert requeue(it).stage is Stage.VERIFY
+
+
+def test_agent_error_does_not_count_toward_verify_retries() -> None:
+    from agent_sdlc.orchestrator.transitions import after_agent_error
+
+    t = after_agent_error(Stage.PLAN, "error_max_turns", 0, 3)
+    assert t == Transition(Stage.PLAN)
+    assert apply_transition(Item(1, "t", "x", "b", Stage.PLAN), t).attempt == 0
+
+
+def test_requeue_drops_agent_errors() -> None:
+    it = Item(1, "t", "x", "b", Stage.PARKED, park_reason=ParkReason.AGENT_ERROR,
+              parked_from=Stage.PLAN, data={"agent_errors": {"plan": 4}, "plan": "p"})
+    assert requeue(it).data == {"plan": "p"}

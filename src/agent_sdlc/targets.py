@@ -107,6 +107,7 @@ class Limits(BaseModel):
     max_item_tokens: int = 2_000_000
     max_denials_per_session: int = 5
     stale_after_minutes: int = 120
+    max_agent_errors: int = 3   # failed agent sessions per stage (spec §4.1)
 
 
 class TargetConfig(BaseModel):

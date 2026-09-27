@@ -137,14 +137,15 @@ def after_pr_poll(status: str, outcomes: list[CommentOutcome], pr_rounds: int,
     return Transition(Stage.IMPLEMENT, feedback=feedback, count_pr_round=True)
 
 
-def after_agent_error(stage: Stage, error: str, attempt: int, max_retries: int) -> Transition:
-    """The agent session ended with an error result (max turns, execution error): retry the
-    stage, and park for a human once the retry budget is spent (I2)."""
-    if attempt >= max_retries:
+def after_agent_error(stage: Stage, error: str, errors: int, max_errors: int) -> Transition:
+    """The agent session ended with an error result (max turns, execution error). `errors`
+    counts earlier failed sessions of this stage; it is separate from verify/review retries
+    (spec §4.1). Park for a human once the budget is spent."""
+    if errors >= max_errors:
         return park(ParkReason.AGENT_ERROR,
-                    f"The {stage.value} agent did not finish after {attempt} retries "
+                    f"The {stage.value} agent did not finish after {errors} retries "
                     f"(agent did not finish: {error or 'error'}).")
-    return Transition(stage, count_attempt=True)
+    return Transition(stage)
 
 
 def apply_transition(item: Item, t: Transition) -> Item:
@@ -184,7 +185,7 @@ def requeue(item: Item) -> Item:
     if reason is ParkReason.PR_ROUNDS:
         to = Stage.IMPLEMENT  # apply the change request kept in data["feedback"] (I5)
     data = {k: v for k, v in item.data.items()
-            if k not in ("park_note", "parked_tag_set", "last_denials")}
+            if k not in ("park_note", "parked_tag_set", "last_denials", "agent_errors")}
     if reason is ParkReason.BUDGET:
         data["budget_offset"] = item.usage.tokens
     if reason is ParkReason.MANIFEST:

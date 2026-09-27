@@ -189,12 +189,23 @@ class StageExecutor:
 
     def _agent_failed(self, item: Item, res: AgentResult, events: list[EventInput],
                       data: dict[str, Any]) -> StepResult | None:
-        """An agent error result (max turns, execution error) is a failed attempt (I2)."""
+        """An agent error result (max turns, execution error) is a failed attempt of this
+        stage, counted per stage (spec §4.1)."""
         if not res.is_error:
             return None
-        t = after_agent_error(item.stage, res.error, item.attempt,
-                              self._t.limits.max_verify_retries)
-        return StepResult(t, res.usage, events=events, data=data)
+        errors = dict(item.data.get("agent_errors") or {})
+        n = int(errors.get(item.stage.value, 0))
+        errors[item.stage.value] = n + 1
+        t = after_agent_error(item.stage, res.error, n, self._t.limits.max_agent_errors)
+        return StepResult(t, res.usage, events=events, data={**data, "agent_errors": errors})
+
+    @staticmethod
+    def _agent_ok(item: Item) -> dict[str, Any]:
+        """Clears this stage's agent-error count once a session finishes cleanly (§4.1)."""
+        errors = dict(item.data.get("agent_errors") or {})
+        if errors.pop(item.stage.value, None) is None:
+            return {}
+        return {"agent_errors": errors or None}
 
     # policy, manifests & install --------------------------------------------
     def _agent_owned(self, item: Item, wt: Path, paths: list[str]) -> list[str]:
@@ -302,6 +313,7 @@ class StageExecutor:
             return stop
         if failed := self._agent_failed(item, res, events, data):
             return failed
+        data.update(self._agent_ok(item))
         state = {"work_item": work_item_text(wi), "plan": res.text[:6000]}
         ds = self._decider.decide("plan", state)
         return StepResult(after_plan(ds, item.replans), res.usage, _logged(ds, state),
@@ -339,6 +351,7 @@ class StageExecutor:
             return stop
         if failed := self._agent_failed(item, res, events, data):
             return failed
+        data.update(self._agent_ok(item))
         self._ws.commit(wt, commit_message(wi, item.pr_rounds, self._forge.item_ref(wi.id)))
         if item.data.get("feedback") and self._ws.head(wt) == before:
             # Nothing new for the feedback: don't report the request as handled (spec §3.2).
@@ -399,6 +412,7 @@ class StageExecutor:
             return stop
         if failed := self._agent_failed(item, res, events, data):
             return failed
+        data.update(self._agent_ok(item))
         state = {"work_item": work_item_text(wi, 3000), "plan": plan[:3000],
                  "review_notes": res.text[:6000]}
         ds = self._decider.decide("review", state)

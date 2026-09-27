@@ -165,3 +165,8 @@ def test_triathlon_target() -> None:
                           "web/package.json", "web/package-lock.json", "web/src/a.ts"]) == [
         "packages/tri-web/pyproject.toml", "pyproject.toml", "uv.lock",
         "web/package-lock.json", "web/package.json"]
+
+
+def test_max_agent_errors_defaults_to_three() -> None:
+    root = Path(__file__).resolve().parents[1]
+    assert load_target(root / "targets" / "rallysource.yaml").limits.max_agent_errors == 3

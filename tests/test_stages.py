@@ -183,10 +183,11 @@ async def test_i2_agent_error_retries_then_parks(  # type: ignore[no-untyped-def
     runner.behaviors = _failing(role)
     data = {"plan": "p", "checks": [], "installed": True}
     res = await ex.run(item(stage, data=data))
-    assert res.transition.to is stage and res.transition.count_attempt
+    assert res.transition.to is stage and not res.transition.count_attempt
+    assert res.data["agent_errors"] == {stage.value: 1}
     assert res.usage == Usage(2, 10, 1)
     assert decider.calls == []  # no gate decision on an unfinished agent run
-    res = await ex.run(item(stage, attempt=3, data=data))
+    res = await ex.run(item(stage, data={**data, "agent_errors": {stage.value: 3}}))
     assert res.transition.park_reason is ParkReason.AGENT_ERROR
     assert "agent did not finish: error_max_turns" in res.transition.note
     assert res.usage == Usage(2, 10, 1)
@@ -294,6 +295,15 @@ async def test_f5_non_escalated_denials_have_no_last_denials(  # type: ignore[no
     res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
     assert res.data["denial_counts"] == {"implementer": 1}
     assert "last_denials" not in res.data
+
+
+async def test_clean_session_clears_that_stages_agent_errors(parts) -> None:  # type: ignore[no-untyped-def]
+    ex, *_ = parts
+    res = await ex.run(item(Stage.PLAN, data={"agent_errors": {"plan": 2, "review": 1}}))
+    assert res.transition.to is Stage.IMPLEMENT
+    assert res.data["agent_errors"] == {"review": 1}
+    res = await ex.run(item(Stage.PLAN, data={"agent_errors": {"plan": 2}}))
+    assert res.data["agent_errors"] is None           # None removes the key on merge
 
 
 async def test_budget_escalation_parks_budget(parts) -> None:  # type: ignore[no-untyped-def]
