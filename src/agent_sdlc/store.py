@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import threading
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from sqlalchemy import JSON, ForeignKey, String, UniqueConstraint, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.pool import StaticPool
 
 from agent_sdlc.types import (
     Calibration,
@@ -179,15 +183,29 @@ def _sqlite_pragmas(dbapi_conn: Any, _record: Any) -> None:
     cur.close()
 
 
+_MEMORY_URLS = ("sqlite://", "sqlite:///:memory:")
+
+
 class Store:
     def __init__(self, url: str) -> None:
-        self._engine = create_engine(url)
+        self._lock: AbstractContextManager[Any]
+        if url in _MEMORY_URLS:
+            # One shared, serialized connection: the default pool gives every thread its own
+            # empty in-memory database, and scheduler steps run in threads (spec §1).
+            self._engine = create_engine(url, poolclass=StaticPool,
+                                         connect_args={"check_same_thread": False})
+            self._lock = threading.RLock()
+        else:
+            self._engine = create_engine(url)
+            self._lock = nullcontext()
         if self._engine.dialect.name == "sqlite":
             event.listen(self._engine, "connect", _sqlite_pragmas)
         Base.metadata.create_all(self._engine)
 
-    def _session(self) -> Session:
-        return Session(self._engine, expire_on_commit=False)
+    @contextmanager
+    def _session(self) -> Iterator[Session]:
+        with self._lock, Session(self._engine, expire_on_commit=False) as s:
+            yield s
 
     # items -----------------------------------------------------------------
     def add_item(self, target: str, wi: WorkItem, branch: str) -> Item | None:
@@ -405,6 +423,11 @@ class Store:
             r = s.get(FlagRow, key)
             return r.value if r else None
 
+    def flags(self, prefix: str) -> dict[str, str]:
+        with self._session() as s:
+            q = select(FlagRow).where(FlagRow.key.startswith(prefix, autoescape=True))
+            return {r.key: r.value for r in s.scalars(q)}
+
     def set_flag(self, key: str, value: str | None) -> None:
         with self._session() as s, s.begin():
             r = s.get(FlagRow, key)
@@ -441,3 +464,25 @@ class Store:
         with self._session() as s:
             r = s.get(DailyUsageRow, day.isoformat())
             return Usage(r.turns, r.input_tokens, r.output_tokens) if r else Usage()
+
+
+def snapshot_sqlite(url: str, dest: Path) -> str:
+    """A consistent copy of a SQLite state DB for a dry run, read through a read-only
+    connection so the source is never written (spec §2). A missing source gives an empty copy."""
+    if not url.startswith("sqlite:///"):
+        raise ValueError(f"not a SQLite file URL: {url}")
+    src = Path(url.removeprefix("sqlite:///"))
+    if src.exists():
+        # Copy the database files directly without opening a connection to the source,
+        # so SQLite doesn't modify the source's shared memory (shm) file (spec §2).
+        with open(src, "rb") as src_db:
+            with open(dest, "wb") as dest_db:
+                dest_db.write(src_db.read())
+        # Copy WAL file if it exists
+        src_wal = Path(str(src) + "-wal")
+        if src_wal.exists():
+            dest_wal = Path(str(dest) + "-wal")
+            with open(src_wal, "rb") as wal_file:
+                with open(dest_wal, "wb") as dest_f:
+                    dest_f.write(wal_file.read())
+    return f"sqlite:///{dest}"

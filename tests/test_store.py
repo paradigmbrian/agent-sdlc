@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_sdlc.store import LabelInput, Store
+from agent_sdlc.store import LabelInput, Store, snapshot_sqlite
 from agent_sdlc.types import Calibration, Decision, EventInput, ParkReason, Stage, Usage, WorkItem
 from tests.fakes import decision
 
@@ -207,3 +207,45 @@ def test_file_db_uses_wal_and_busy_timeout(tmp_path: Path) -> None:
     with s._engine.connect() as c:  # noqa: SLF001 - pragma check
         assert c.exec_driver_sql("PRAGMA journal_mode").scalar() == "wal"
         assert c.exec_driver_sql("PRAGMA busy_timeout").scalar() == 30000
+
+
+def test_memory_store_is_shared_across_threads() -> None:
+    store = Store("sqlite://")
+    t = threading.Thread(target=lambda: store.set_flag("k", "v"))
+    t.start()
+    t.join()
+    assert store.get_flag("k") == "v"
+
+
+def test_flags_by_prefix_escapes_wildcards() -> None:
+    store = Store("sqlite://")
+    for k in ("busy:a:1", "busy:a:2", "busy:ab:3", "a_b:1", "axb:1"):
+        store.set_flag(k, k)
+    assert set(store.flags("busy:a:")) == {"busy:a:1", "busy:a:2"}
+    assert set(store.flags("a_b:")) == {"a_b:1"}
+
+
+def _files(db: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in db.parent.glob(db.name + "*")}
+
+
+def test_snapshot_copies_uncheckpointed_wal_and_leaves_source_untouched(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    store = Store(f"sqlite:///{db}")
+    store.add_item("t", WI, "agent/5-x")          # still in the -wal file: engine not disposed
+    before = _files(db)
+    url = snapshot_sqlite(f"sqlite:///{db}", tmp_path / "copy.db")
+    assert url == f"sqlite:///{tmp_path / 'copy.db'}"
+    assert Store(url).get_by_ref("t", WI.id).title == WI.title
+    assert _files(db) == before
+
+
+def test_snapshot_of_missing_db_is_empty(tmp_path: Path) -> None:
+    url = snapshot_sqlite(f"sqlite:///{tmp_path / 'none.db'}", tmp_path / "copy.db")
+    assert Store(url).items("t") == []
+    assert not (tmp_path / "none.db").exists()
+
+
+def test_snapshot_rejects_non_sqlite_url(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="not a SQLite file URL"):
+        snapshot_sqlite("postgresql://h/db", tmp_path / "copy.db")
