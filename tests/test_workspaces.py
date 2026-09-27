@@ -387,3 +387,34 @@ def test_human_blobs_returns_only_the_humans_paths_at_fetch_head(
 def test_human_blobs_empty_before_anything_is_fetched(ws: Workspaces) -> None:
     wt = ws.create(1, BR)                      # never fetched the PR branch
     assert ws.human_blobs(wt) == {}
+
+
+def test_incorporate_refreshes_base_so_upstream_commits_are_not_the_agents(
+    ws: Workspaces, tmp_path: Path, origin_repo: Path
+) -> None:
+    """Finding 2: origin/dev is only refreshed when a worktree is first created. If a human
+    merges dev into the PR branch ("Update branch") after another (agent-authored) PR landed on
+    dev, incorporate_remote must refresh origin/dev first, or that upstream commit is counted as
+    this agent's own change."""
+    wt = _pushed(ws, origin_repo)                       # worktree created; origin/dev now fixed
+
+    other = tmp_path / "other"
+    git("clone", "-q", str(origin_repo), str(other), cwd=tmp_path)
+    git("checkout", "-q", "dev", cwd=other)
+    (other / "upstream.txt").write_text("upstream\n")
+    git("add", "-A", cwd=other)
+    git("-c", "user.name=agent-sdlc", "-c", "user.email=agent-sdlc@localhost",
+        "commit", "-qm", "feat: upstream", cwd=other)
+    git("push", "-q", "origin", "dev", cwd=other)        # another agent's PR merged to dev
+
+    human = tmp_path / "human2"
+    git("clone", "-q", str(origin_repo), str(human), cwd=tmp_path)
+    git("fetch", "-q", "origin", cwd=human)
+    git("checkout", "-q", "-B", BR, f"origin/{BR}", cwd=human)
+    git("-c", "user.name=h", "-c", "user.email=h@h", "merge", "-q", "--no-edit", "origin/dev",
+        cwd=human)
+    git("push", "-q", "origin", f"HEAD:refs/heads/{BR}", cwd=human)  # human's "Update branch"
+
+    ws.incorporate_remote(wt, BR)
+    assert (wt / "upstream.txt").exists()                # merged in
+    assert "upstream.txt" not in ws.changed_files(wt)     # but not counted as the agent's change

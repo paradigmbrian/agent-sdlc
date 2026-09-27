@@ -293,6 +293,11 @@ class Workspaces:
         # Held for the fetch too: it opportunistically updates the shared remote-tracking ref
         # refs/remotes/origin/<branch>, which races _ensure_base's `fetch --prune` (spec §1).
         with self._base_lock:
+            # Refresh origin/<base> first: during PR rounds it is otherwise only refreshed when
+            # a worktree is first created, so after a human merges base into the PR branch
+            # ("Update branch"), upstream commits by other (agent-authored) PRs would be counted
+            # as this agent's own changes against a stale origin/<base> (spec §3.1 fix).
+            self._git("fetch", "--prune", "origin", cwd=self._base, auth=True)
             r = self._run_git("fetch", "origin", f"refs/heads/{branch}", cwd=wt, auth=True)
         if r.returncode != 0:
             if "couldn't find remote ref" in r.stderr.lower():
