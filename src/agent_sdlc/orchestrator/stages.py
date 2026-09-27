@@ -328,6 +328,7 @@ class StageExecutor:
         failed_install, inst_data, events = self._ensure_installed(item, wt)
         if failed_install:
             return failed_install
+        before = self._ws.head(wt)
         res, agent_evs, data = await self._run_agent(
             item, IMPLEMENTER, implementer_prompt(wi, str(item.data.get("plan", "")),
                                                   item.data.get("feedback")),
@@ -339,6 +340,11 @@ class StageExecutor:
         if failed := self._agent_failed(item, res, events, data):
             return failed
         self._ws.commit(wt, commit_message(wi, item.pr_rounds, self._forge.item_ref(wi.id)))
+        if item.data.get("feedback") and self._ws.head(wt) == before:
+            # Nothing new for the feedback: don't report the request as handled (spec §3.2).
+            return StepResult(park(ParkReason.NEEDS_HUMAN,
+                                   "The implementer made no changes for the feedback."),
+                              res.usage, data=data, events=events)
         files = self._ws.changed_files(wt)
         t = after_implement(self._pp.violations(self._agent_owned(item, wt, files)),
                             bool(files), self._agent_diff_lines(item, wt),

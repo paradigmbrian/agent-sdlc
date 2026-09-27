@@ -715,3 +715,33 @@ async def test_agent_auto_merged_edit_to_a_human_file_is_still_caught(  # type: 
     res = await ex.run(item(Stage.IMPLEMENT, pr_id=100, data=PR_ROUND))
     assert res.transition.park_reason is ParkReason.POLICY
     assert "infra/main.tf" in res.transition.note
+
+
+# --- task 7: park rounds that change nothing -------
+
+
+def _idle(role, prompt, cwd):  # type: ignore[no-untyped-def]
+    return AgentResult("nothing to change", Usage(1, 1, 1))
+
+
+async def test_round_with_feedback_and_no_new_commit_parks(  # type: ignore[no-untyped-def]
+    parts,
+) -> None:
+    ex, _, ws, _, runner = parts
+    wt = ws.create(5, BRANCH)
+    (wt / "feature.txt").write_text("v1\n")
+    ws.commit(wt, "feat: v1")                         # an earlier round's change
+    runner.behaviors = {"implementer": _idle}
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p", "feedback": "rename it"}))
+    assert res.transition.park_reason is ParkReason.NEEDS_HUMAN
+    assert res.transition.note == "The implementer made no changes for the feedback."
+    assert "feedback" not in res.data                 # kept on the item for the requeue
+
+
+async def test_first_implement_without_changes_keeps_existing_park(  # type: ignore[no-untyped-def]
+    parts,
+) -> None:
+    ex, _, _, _, runner = parts
+    runner.behaviors = {"implementer": _idle}
+    res = await ex.run(item(Stage.IMPLEMENT, data={"plan": "p"}))
+    assert res.transition.note == "The implementer made no changes."
